@@ -132,11 +132,12 @@ class COCOInstance(LightningDataModule):
         polygons_by_id: dict[int, list[list[float]]],
         labels_by_id: dict[int, int],
         is_crowd_by_id: dict[int, bool],
+        bboxes_by_id: dict[int, list[float]],
         width: int,
         height: int,
         **kwargs
     ):
-        masks, labels, is_crowd = [], [], []
+        masks, labels, is_crowd, boxes = [], [], [], []
 
         for label_id, cls_id in labels_by_id.items():
             if cls_id not in CLASS_MAPPING:
@@ -149,8 +150,16 @@ class COCOInstance(LightningDataModule):
             masks.append(tv_tensors.Mask(coco_mask.decode(rle), dtype=torch.bool))
             labels.append(CLASS_MAPPING[cls_id])
             is_crowd.append(is_crowd_by_id[label_id])
+            x, y, w, h = bboxes_by_id[label_id]
+            boxes.append([x, y, x + w, y + h])
 
-        return masks, labels, is_crowd
+        boxes = tv_tensors.BoundingBoxes(
+            torch.tensor(boxes, dtype=torch.float32).reshape(-1, 4),
+            format="XYXY",
+            canvas_size=(height, width),
+        )
+
+        return masks, labels, is_crowd, boxes
 
     def setup(self, stage: Union[str, None] = None) -> LightningDataModule:
         dataset_kwargs = {

@@ -11,6 +11,7 @@ from typing import List, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torchvision.ops import box_convert, masks_to_boxes
 
 from training.mask_classification_loss import MaskClassificationLoss
 from training.lightning_module import LightningModule
@@ -39,6 +40,8 @@ class MaskClassificationInstance(LightningModule):
         mask_coefficient: float = 5.0,
         dice_coefficient: float = 5.0,
         class_coefficient: float = 2.0,
+        bbox_l1_coefficient: float = 5.0,
+        bbox_giou_coefficient: float = 2.0,
         mask_thresh: float = 0.8,
         overlap_thresh: float = 0.8,
         eval_top_k_instances: int = 100,
@@ -79,6 +82,8 @@ class MaskClassificationInstance(LightningModule):
             mask_coefficient=mask_coefficient,
             dice_coefficient=dice_coefficient,
             class_coefficient=class_coefficient,
+            bbox_l1_coefficient=bbox_l1_coefficient,
+            bbox_giou_coefficient=bbox_giou_coefficient,
             num_labels=num_classes,
             no_object_coefficient=no_object_coefficient,
         )
@@ -95,10 +100,12 @@ class MaskClassificationInstance(LightningModule):
 
         img_sizes = [img.shape[-2:] for img in imgs]
         transformed_imgs = self.resize_and_pad_imgs_instance_panoptic(imgs)
-        mask_logits_per_layer, class_logits_per_layer = self(transformed_imgs)
+        mask_logits_per_layer, class_logits_per_layer, bbox_preds_per_layer = self(
+            transformed_imgs
+        )
 
-        for i, (mask_logits, class_logits) in enumerate(
-            list(zip(mask_logits_per_layer, class_logits_per_layer))
+        for i, (mask_logits, class_logits, bbox_preds) in enumerate(
+            list(zip(mask_logits_per_layer, class_logits_per_layer, bbox_preds_per_layer))
         ):
             mask_logits = F.interpolate(mask_logits, self.img_size, mode="bilinear")
             mask_logits = self.revert_resize_and_pad_logits_instance_panoptic(
@@ -128,23 +135,47 @@ class MaskClassificationInstance(LightningModule):
                     mask_logits[j].sigmoid().flatten(1) * masks.flatten(1)
                 ).sum(1) / (masks.flatten(1).sum(1) + 1e-6)
                 scores = topk_scores * mask_scores
+                if bbox_preds is not None:
+                    bbox_preds_j = bbox_preds[j][topk_indices]
+                    boxes = box_convert(bbox_preds_j, "cxcywh", "xyxy").clamp(0, 1)
+                    scale = torch.tensor(
+                        [
+                            img_sizes[j][1],
+                            img_sizes[j][0],
+                            img_sizes[j][1],
+                            img_sizes[j][0],
+                        ],
+                        device=boxes.device,
+                        dtype=boxes.dtype,
+                    )
+                    boxes = boxes * scale
+                else:
+                    boxes = masks_to_boxes(masks.float())
 
                 preds.append(
                     dict(
                         masks=masks,
                         labels=labels,
                         scores=scores,
+                        boxes=boxes,
                     )
                 )
+                if "boxes" in targets[j]:
+                    target_boxes = targets[j]["boxes"].to(
+                        device=self.device, dtype=torch.float32
+                    )
+                else:
+                    target_boxes = masks_to_boxes(targets[j]["masks"].float())
                 targets_.append(
                     dict(
                         masks=targets[j]["masks"],
                         labels=targets[j]["labels"],
+                        boxes=target_boxes,
                         iscrowd=targets[j]["is_crowd"],
                     )
                 )
 
-            self.update_metrics_instance(preds, targets, i)
+            self.update_metrics_instance(preds, targets_, i)
 
     def on_validation_epoch_end(self):
         self._on_eval_epoch_end_instance("val")

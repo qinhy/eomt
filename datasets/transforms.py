@@ -90,6 +90,8 @@ class Transforms(nn.Module):
 
         img = F.pad(img, padding)
         target["masks"] = F.pad(target["masks"], padding)
+        if "boxes" in target:
+            target["boxes"] = F.pad(target["boxes"], padding)
 
         return img, target
 

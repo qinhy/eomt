@@ -13,6 +13,8 @@ from typing import List, Optional
 import torch.distributed as dist
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from torchvision.ops import box_convert, generalized_box_iou
 from transformers.models.mask2former.modeling_mask2former import (
     Mask2FormerLoss,
     Mask2FormerHungarianMatcher,
@@ -30,6 +32,8 @@ class MaskClassificationLoss(Mask2FormerLoss):
         class_coefficient: float,
         num_labels: int,
         no_object_coefficient: float,
+        bbox_l1_coefficient: float = 0.0,
+        bbox_giou_coefficient: float = 0.0,
     ):
         nn.Module.__init__(self)
         self.num_points = num_points
@@ -38,6 +42,8 @@ class MaskClassificationLoss(Mask2FormerLoss):
         self.mask_coefficient = mask_coefficient
         self.dice_coefficient = dice_coefficient
         self.class_coefficient = class_coefficient
+        self.bbox_l1_coefficient = bbox_l1_coefficient
+        self.bbox_giou_coefficient = bbox_giou_coefficient
         self.num_labels = num_labels
         self.eos_coef = no_object_coefficient
         empty_weight = torch.ones(self.num_labels + 1)
@@ -57,6 +63,7 @@ class MaskClassificationLoss(Mask2FormerLoss):
         masks_queries_logits: torch.Tensor,
         targets: List[dict],
         class_queries_logits: Optional[torch.Tensor] = None,
+        bbox_queries_preds: Optional[torch.Tensor] = None,
     ):
         mask_labels = [
             target["masks"].to(masks_queries_logits.dtype) for target in targets
@@ -72,8 +79,28 @@ class MaskClassificationLoss(Mask2FormerLoss):
 
         loss_masks = self.loss_masks(masks_queries_logits, mask_labels, indices)
         loss_classes = self.loss_labels(class_queries_logits, class_labels, indices)
+        losses = {**loss_masks, **loss_classes}
 
-        return {**loss_masks, **loss_classes}
+        has_boxes = bbox_queries_preds is not None and all(
+            "boxes" in target for target in targets
+        )
+        if has_boxes:
+            box_labels = []
+            for target in targets:
+                height, width = target["masks"].shape[-2:]
+                scale = torch.tensor(
+                    [width, height, width, height],
+                    device=masks_queries_logits.device,
+                    dtype=masks_queries_logits.dtype,
+                )
+                boxes_xyxy = target["boxes"].to(
+                    device=masks_queries_logits.device, dtype=masks_queries_logits.dtype
+                )
+                boxes_cxcywh = box_convert(boxes_xyxy / scale, "xyxy", "cxcywh")
+                box_labels.append(boxes_cxcywh.clamp(0, 1))
+            losses |= self.loss_boxes(bbox_queries_preds, box_labels, indices)
+
+        return losses
 
     def loss_masks(self, masks_queries_logits, mask_labels, indices):
         loss_masks = super().loss_masks(masks_queries_logits, mask_labels, indices, 1)
@@ -96,6 +123,48 @@ class MaskClassificationLoss(Mask2FormerLoss):
 
         return loss_masks
 
+    def loss_boxes(
+        self,
+        bbox_queries_preds: torch.Tensor,
+        box_labels: List[torch.Tensor],
+        indices,
+    ):
+        src_boxes, target_boxes = [], []
+        for batch_idx, (src_idx, tgt_idx) in enumerate(indices):
+            if len(src_idx) == 0:
+                continue
+            src_boxes.append(bbox_queries_preds[batch_idx, src_idx])
+            target_boxes.append(box_labels[batch_idx][tgt_idx])
+
+        if len(src_boxes) == 0:
+            zero = bbox_queries_preds.sum() * 0.0
+            return {"loss_bbox": zero, "loss_giou": zero}
+
+        src_boxes = torch.cat(src_boxes, dim=0)
+        target_boxes = torch.cat(target_boxes, dim=0).to(src_boxes.dtype)
+
+        loss_bbox = F.l1_loss(src_boxes, target_boxes, reduction="none").sum()
+        src_xyxy = box_convert(src_boxes, "cxcywh", "xyxy").clamp(0, 1)
+        target_xyxy = box_convert(target_boxes, "cxcywh", "xyxy").clamp(0, 1)
+        loss_giou = (1.0 - torch.diag(generalized_box_iou(src_xyxy, target_xyxy))).sum()
+
+        num_boxes = sum(len(tgt) for (_, tgt) in indices)
+        num_boxes_tensor = torch.as_tensor(
+            num_boxes, dtype=torch.float, device=bbox_queries_preds.device
+        )
+
+        if dist.is_available() and dist.is_initialized():
+            dist.all_reduce(num_boxes_tensor)
+            world_size = dist.get_world_size()
+        else:
+            world_size = 1
+
+        num_boxes = torch.clamp(num_boxes_tensor / world_size, min=1)
+        return {
+            "loss_bbox": loss_bbox / num_boxes,
+            "loss_giou": loss_giou / num_boxes,
+        }
+
     def loss_total(self, losses_all_layers, log_fn) -> torch.Tensor:
         loss_total = None
         for loss_key, loss in losses_all_layers.items():
@@ -107,6 +176,10 @@ class MaskClassificationLoss(Mask2FormerLoss):
                 weighted_loss = loss * self.dice_coefficient
             elif "cross_entropy" in loss_key:
                 weighted_loss = loss * self.class_coefficient
+            elif "loss_bbox" in loss_key:
+                weighted_loss = loss * self.bbox_l1_coefficient
+            elif "loss_giou" in loss_key:
+                weighted_loss = loss * self.bbox_giou_coefficient
             else:
                 raise ValueError(f"Unknown loss key: {loss_key}")
 

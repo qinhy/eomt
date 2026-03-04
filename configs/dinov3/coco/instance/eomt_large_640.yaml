@@ -13,6 +13,8 @@ model:
     attn_mask_annealing_enabled: True
     attn_mask_annealing_start_steps: [14782, 29564, 44346, 59128]
     attn_mask_annealing_end_steps: [29564, 44346, 59128, 73910]
+    bbox_l1_coefficient: 5.0
+    bbox_giou_coefficient: 2.0
     lr: 2e-4
     llrd_l2_enabled: False
     warmup_steps: [2000, 3000]
@@ -21,6 +23,7 @@ model:
       class_path: models.eomt.EoMT
       init_args:
         num_q: 200
+        bbox_head_enabled: True
         encoder:
           class_path: models.vit.ViT
           init_args:

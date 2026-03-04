@@ -95,7 +95,7 @@ class MaskClassificationPanoptic(LightningModule):
 
         img_sizes = [img.shape[-2:] for img in imgs]
         transformed_imgs = self.resize_and_pad_imgs_instance_panoptic(imgs)
-        mask_logits_per_layer, class_logits_per_layer = self(transformed_imgs)
+        mask_logits_per_layer, class_logits_per_layer, _ = self(transformed_imgs)
 
         is_crowds = [target["is_crowd"] for target in targets]
         targets = self.to_per_pixel_targets_panoptic(targets)

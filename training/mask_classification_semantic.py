@@ -91,7 +91,7 @@ class MaskClassificationSemantic(LightningModule):
 
         img_sizes = [img.shape[-2:] for img in imgs]
         crops, origins = self.window_imgs_semantic(imgs)
-        mask_logits_per_layer, class_logits_per_layer = self(crops)
+        mask_logits_per_layer, class_logits_per_layer, _ = self(crops)
 
         targets = self.to_per_pixel_targets_semantic(targets, self.ignore_idx)
 

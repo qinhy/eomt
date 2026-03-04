@@ -176,15 +176,16 @@ class LightningModule(lightning.LightningModule):
     def training_step(self, batch, batch_idx):
         imgs, targets = batch
 
-        mask_logits_per_block, class_logits_per_block = self(imgs)
+        mask_logits_per_block, class_logits_per_block, bbox_preds_per_block = self(imgs)
 
         losses_all_blocks = {}
-        for i, (mask_logits, class_logits) in enumerate(
-            list(zip(mask_logits_per_block, class_logits_per_block))
+        for i, (mask_logits, class_logits, bbox_preds) in enumerate(
+            list(zip(mask_logits_per_block, class_logits_per_block, bbox_preds_per_block))
         ):
             losses = self.criterion(
                 masks_queries_logits=mask_logits,
                 class_queries_logits=class_logits,
+                bbox_queries_preds=bbox_preds,
                 targets=targets,
             )
             block_postfix = self.block_postfix(i)
@@ -244,9 +245,13 @@ class LightningModule(lightning.LightningModule):
         )
 
     def init_metrics_instance(self, num_blocks):
-        self.metrics = nn.ModuleList(
+        self.metrics_segm = nn.ModuleList(
             [MeanAveragePrecision(iou_type="segm") for _ in range(num_blocks)]
         )
+        self.metrics_bbox = nn.ModuleList(
+            [MeanAveragePrecision(iou_type="bbox") for _ in range(num_blocks)]
+        )
+        self.metrics = self.metrics_segm
 
     def init_metrics_panoptic(self, thing_classes, stuff_classes, num_blocks):
         self.metrics = nn.ModuleList(
@@ -278,7 +283,31 @@ class LightningModule(lightning.LightningModule):
         targets: list[dict],
         block_idx,
     ):
-        self.metrics[block_idx].update(preds, targets)
+        segm_preds = [
+            {"masks": pred["masks"], "labels": pred["labels"], "scores": pred["scores"]}
+            for pred in preds
+        ]
+        segm_targets = []
+        for target in targets:
+            segm_target = {"masks": target["masks"], "labels": target["labels"]}
+            if "iscrowd" in target:
+                segm_target["iscrowd"] = target["iscrowd"]
+            segm_targets.append(segm_target)
+
+        self.metrics_segm[block_idx].update(segm_preds, segm_targets)
+
+        bbox_preds = [
+            {"boxes": pred["boxes"], "labels": pred["labels"], "scores": pred["scores"]}
+            for pred in preds
+        ]
+        bbox_targets = []
+        for target in targets:
+            bbox_target = {"boxes": target["boxes"], "labels": target["labels"]}
+            if "iscrowd" in target:
+                bbox_target["iscrowd"] = target["iscrowd"]
+            bbox_targets.append(bbox_target)
+
+        self.metrics_bbox[block_idx].update(bbox_preds, bbox_targets)
 
     @torch.compiler.disable
     def update_metrics_panoptic(
@@ -412,34 +441,62 @@ class LightningModule(lightning.LightningModule):
             )
 
     def _on_eval_epoch_end_instance(self, log_prefix):
-        for i, metric in enumerate(self.metrics):  # type: ignore
-            results = metric.compute()
-            metric.reset()
+        for i, (segm_metric, bbox_metric) in enumerate(
+            zip(self.metrics_segm, self.metrics_bbox)
+        ):
+            segm_results = segm_metric.compute()
+            bbox_results = bbox_metric.compute()
+            segm_metric.reset()
+            bbox_metric.reset()
 
             block_postfix = self.block_postfix(i)
             self.log(
                 f"metrics/{log_prefix}_ap_all{block_postfix}",
-                results["map"],
+                segm_results["map"],
             )
             self.log(
                 f"metrics/{log_prefix}_ap_small_all{block_postfix}",
-                results["map_small"],
+                segm_results["map_small"],
             )
             self.log(
                 f"metrics/{log_prefix}_ap_medium_all{block_postfix}",
-                results["map_medium"],
+                segm_results["map_medium"],
             )
             self.log(
                 f"metrics/{log_prefix}_ap_large_all{block_postfix}",
-                results["map_large"],
+                segm_results["map_large"],
             )
             self.log(
                 f"metrics/{log_prefix}_ap_50_all{block_postfix}",
-                results["map_50"],
+                segm_results["map_50"],
             )
             self.log(
                 f"metrics/{log_prefix}_ap_75_all{block_postfix}",
-                results["map_75"],
+                segm_results["map_75"],
+            )
+            self.log(
+                f"metrics/{log_prefix}_bbox_ap_all{block_postfix}",
+                bbox_results["map"],
+            )
+            self.log(
+                f"metrics/{log_prefix}_bbox_ap_small_all{block_postfix}",
+                bbox_results["map_small"],
+            )
+            self.log(
+                f"metrics/{log_prefix}_bbox_ap_medium_all{block_postfix}",
+                bbox_results["map_medium"],
+            )
+            self.log(
+                f"metrics/{log_prefix}_bbox_ap_large_all{block_postfix}",
+                bbox_results["map_large"],
+            )
+            self.log(
+                f"metrics/{log_prefix}_bbox_ap_50_all{block_postfix}",
+                bbox_results["map_50"],
+            )
+            self.log(
+                f"metrics/{log_prefix}_bbox_ap_75_all{block_postfix}",
+                bbox_results["map_75"],
             )
 
     def _on_eval_epoch_end_panoptic(self, log_prefix, log_per_class=False):
@@ -521,7 +578,8 @@ class LightningModule(lightning.LightningModule):
                 f"{bold_green}mAP All: {self.trainer.callback_metrics[f'metrics/{log_prefix}_ap_all'] * 100:.1f} | "
                 f"mAP Small: {self.trainer.callback_metrics[f'metrics/{log_prefix}_ap_small_all'] * 100:.1f} | "
                 f"mAP Medium: {self.trainer.callback_metrics[f'metrics/{log_prefix}_ap_medium_all'] * 100:.1f} | "
-                f"mAP Large: {self.trainer.callback_metrics[f'metrics/{log_prefix}_ap_large_all'] * 100:.1f}{reset}"
+                f"mAP Large: {self.trainer.callback_metrics[f'metrics/{log_prefix}_ap_large_all'] * 100:.1f} | "
+                f"Box mAP All: {self.trainer.callback_metrics[f'metrics/{log_prefix}_bbox_ap_all'] * 100:.1f}{reset}"
             )
 
     def _on_eval_end_panoptic(self, log_prefix):
@@ -866,7 +924,8 @@ class LightningModule(lightning.LightningModule):
         summed = {}
         for k in state_dict1.keys():
             if k not in state_dict2:
-                raise KeyError(f"Key {k} not found in second state_dict")
+                summed[k] = state_dict1[k]
+                continue
 
             if state_dict1[k].shape != state_dict2[k].shape:
                 raise ValueError(
@@ -893,16 +952,34 @@ class LightningModule(lightning.LightningModule):
         return ckpt
 
     def _raise_on_incompatible(self, incompatible_keys, load_ckpt_class_head):
+        def is_class_or_bbox_head(key: str):
+            return (
+                ("class_head" in key)
+                or ("class_predictor" in key)
+                or ("bbox_head" in key)
+                or ("bbox_predictor" in key)
+            )
+
         if incompatible_keys.missing_keys:
             if not load_ckpt_class_head:
                 missing_keys = [
                     key
                     for key in incompatible_keys.missing_keys
-                    if "class_head" not in key and "class_predictor" not in key
+                    if not is_class_or_bbox_head(key)
                 ]
             else:
-                missing_keys = incompatible_keys.missing_keys
+                missing_keys = [
+                    key
+                    for key in incompatible_keys.missing_keys
+                    if "bbox_head" not in key and "bbox_predictor" not in key
+                ]
             if missing_keys:
                 raise ValueError(f"Missing keys: {missing_keys}")
         if incompatible_keys.unexpected_keys:
-            raise ValueError(f"Unexpected keys: {incompatible_keys.unexpected_keys}")
+            unexpected_keys = [
+                key
+                for key in incompatible_keys.unexpected_keys
+                if "bbox_head" not in key and "bbox_predictor" not in key
+            ]
+            if unexpected_keys:
+                raise ValueError(f"Unexpected keys: {unexpected_keys}")

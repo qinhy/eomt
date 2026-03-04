@@ -60,6 +60,22 @@ conda activate eomt
 python3 -m pip install -r requirements.txt
 ```
 
+Alternatively, use `uv`:
+
+```bash
+uv sync
+```
+
+Then run commands with:
+
+```bash
+uv run python3 main.py fit \
+  -c configs/dinov2/coco/panoptic/eomt_large_640.yaml \
+  --trainer.devices 4 \
+  --data.batch_size 4 \
+  --data.path /path/to/dataset
+```
+
 [Weights & Biases](https://wandb.ai/) (wandb) is used for experiment logging and visualization. To enable wandb, log in to your account:
 
 ```bash
