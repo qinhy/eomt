@@ -13,12 +13,13 @@ import torch.nn.functional as F
 import math
 
 from models.scale_block import ScaleBlock
+from models.vit import ViT
 
 
 class EoMT(nn.Module):
     def __init__(
         self,
-        encoder: nn.Module,
+        encoder: ViT,
         num_classes,
         num_q,
         num_blocks=4,
@@ -67,6 +68,16 @@ class EoMT(nn.Module):
         self.upscale = nn.Sequential(
             *[ScaleBlock(self.encoder.backbone.embed_dim) for _ in range(num_upscale)],
         )
+
+    def freeze_encoder(self):        
+        self.encoder.eval()
+        for param in self.encoder.parameters():
+            param.requires_grad = False
+
+    def unfreeze_encoder(self):
+        self.encoder.train()
+        for param in self.encoder.parameters():
+            param.requires_grad = True
 
     def _predict(self, x: torch.Tensor):
         q = x[:, : self.num_q, :]

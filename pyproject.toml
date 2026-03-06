@@ -18,7 +18,9 @@ dependencies = [
     "ipykernel==6.29.5",
     "fvcore==0.1.5.post20221221",
     "torchmetrics==1.7.1",
-    "pycocotools==2.0.8",
+    "pycocotools>=2.0.11",
+    'triton-windows>=3.3,<3.4; platform_system=="Windows"',
+    'triton>=3.3,<3.4; platform_system!="Windows"',
 ]
 
 [tool.uv]
@@ -32,3 +34,8 @@ torchvision = { index = "torch-cuda" }
 name = "torch-cuda"
 url = "https://download.pytorch.org/whl/cu126"
 explicit = true
+
+[dependency-groups]
+dev = [
+    "ipython>=9.10.0",
+]

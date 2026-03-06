@@ -34,6 +34,7 @@ from torch.nn.functional import interpolate
 from torchvision.transforms.v2.functional import pad
 import logging
 
+from models.eomt import EoMT
 from training.two_stage_warmup_poly_schedule import TwoStageWarmupPolySchedule
 
 bold_green = "\033[1;32m"
@@ -43,7 +44,7 @@ reset = "\033[0m"
 class LightningModule(lightning.LightningModule):
     def __init__(
         self,
-        network: nn.Module,
+        network: EoMT,
         img_size: tuple[int, int],
         num_classes: int,
         attn_mask_annealing_enabled: bool,

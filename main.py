@@ -18,6 +18,7 @@ from lightning.pytorch.callbacks import ModelSummary, LearningRateMonitor
 from lightning.pytorch.loops.training_epoch_loop import _TrainingEpochLoop
 from lightning.pytorch.loops.fetchers import _DataFetcher, _DataLoaderIterDataFetcher
 
+from models.eomt import EoMT
 from training.lightning_module import LightningModule
 from datasets.lightning_data_module import LightningDataModule
 
@@ -139,7 +140,31 @@ class LightningCLI(cli.LightningCLI):
             "model.init_args.network.init_args.encoder.init_args.ckpt_path",
         )
 
-    def fit(self, model, **kwargs):
+    # def before_fit(self):
+    #     x = torch.rand((1, 3, 640, 640))
+
+    #     logging.info('try model(x)')
+    #     model = self.model
+    #     if not self.config[self.config["subcommand"]]["compile_disabled"]:
+    #         model = torch.compile(model,backend="aot_eager")
+    #     model.eval()
+    #     with torch.no_grad():
+    #         _ = model(x)
+
+    #     logging.info('try datamodule.setup("fit")')
+    #     self.datamodule.setup("fit")
+    #     batch = next(iter(self.datamodule.train_dataloader()))
+
+    #     if isinstance(batch, (list, tuple)):
+    #         x = batch[0]
+    #     elif isinstance(batch, dict):
+    #         x = batch["image"]
+    #     else:
+    #         raise TypeError(f"Unsupported batch type: {type(batch)}")
+
+    #     logging.info("Pre-fit sanity checks passed")
+
+    def fit(self, model:LightningModule, **kwargs):
         if hasattr(self.trainer.logger.experiment, "log_code"):
             is_gitignored = parse_gitignore(".gitignore")
             include_fn = lambda path: path.endswith(".py") or path.endswith(".yaml")
@@ -150,9 +175,11 @@ class LightningCLI(cli.LightningCLI):
         self.trainer.fit_loop.epoch_loop._should_check_val_fx = MethodType(
             _should_check_val_fx, self.trainer.fit_loop.epoch_loop
         )
-
+        
+        model.train()
+        model.network.freeze_encoder()
         if not self.config[self.config["subcommand"]]["compile_disabled"]:
-            model = torch.compile(model)
+            model = torch.compile(model,backend="aot_eager")
 
         self.trainer.fit(model, **kwargs)
 

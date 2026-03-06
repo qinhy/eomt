@@ -170,15 +170,15 @@ class COCOInstance(LightningDataModule):
         }
         self.train_dataset = Dataset(
             transforms=self.transforms,
-            img_folder_path_in_zip=Path("./train2017"),
-            annotations_json_path_in_zip=Path("./annotations/instances_train2017.json"),
+            img_folder_path_in_zip="train2017",
+            annotations_json_path_in_zip="annotations/instances_train2017.json",
             target_zip_path=Path(self.path, "annotations_trainval2017.zip"),
             zip_path=Path(self.path, "train2017.zip"),
             **dataset_kwargs,
         )
         self.val_dataset = Dataset(
-            img_folder_path_in_zip=Path("./val2017"),
-            annotations_json_path_in_zip=Path("./annotations/instances_val2017.json"),
+            img_folder_path_in_zip="val2017",
+            annotations_json_path_in_zip="annotations/instances_val2017.json",
             target_zip_path=Path(self.path, "annotations_trainval2017.zip"),
             zip_path=Path(self.path, "val2017.zip"),
             **dataset_kwargs,

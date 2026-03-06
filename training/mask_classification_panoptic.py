@@ -8,6 +8,7 @@ from typing import List, Optional
 import torch.nn as nn
 import torch.nn.functional as F
 
+from models.eomt import EoMT
 from training.mask_classification_loss import MaskClassificationLoss
 from training.lightning_module import LightningModule
 
@@ -15,7 +16,7 @@ from training.lightning_module import LightningModule
 class MaskClassificationPanoptic(LightningModule):
     def __init__(
         self,
-        network: nn.Module,
+        network: EoMT,
         img_size: tuple[int, int],
         num_classes: int,
         stuff_classes: list[int],

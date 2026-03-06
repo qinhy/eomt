@@ -201,3 +201,6 @@ This project builds upon code from the following libraries and repositories:
 - [TorchMetrics](https://github.com/Lightning-AI/torchmetrics) (Apache-2.0 License)  
 - [Mask2Former](https://github.com/facebookresearch/Mask2Former) (Apache-2.0 License)
 - [Detectron2](https://github.com/facebookresearch/detectron2) (Apache-2.0 License)
+
+
+uv run main.py fit -c configs/dinov3/coco/instance/eomt_large_640.yaml --trainer.devices 1 --data.batch_size 1 --data.path D:/images.cocodataset.org
