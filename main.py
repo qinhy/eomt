@@ -146,7 +146,7 @@ class LightningCLI(cli.LightningCLI):
     #     logging.info('try model(x)')
     #     model = self.model
     #     if not self.config[self.config["subcommand"]]["compile_disabled"]:
-    #         model = torch.compile(model,backend="aot_eager")
+    #         model = torch.compile(model)
     #     model.eval()
     #     with torch.no_grad():
     #         _ = model(x)
@@ -179,7 +179,7 @@ class LightningCLI(cli.LightningCLI):
         model.train()
         model.network.freeze_encoder()
         if not self.config[self.config["subcommand"]]["compile_disabled"]:
-            model = torch.compile(model,backend="aot_eager")
+            model = torch.compile(model)
 
         self.trainer.fit(model, **kwargs)
 

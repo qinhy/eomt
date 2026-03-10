@@ -1,10 +1,9 @@
 trainer:
   max_epochs: 16
   logger:
-    class_path: lightning.pytorch.loggers.wandb.WandbLogger
+    class_path: lightning.pytorch.loggers.CSVLogger
     init_args:
-      resume: allow
-      project: "eomt"
+      save_dir: logs
       name: "ade20k_semantic_eomt_large_512_dinov3"
 model:
   class_path: training.mask_classification_semantic.MaskClassificationSemantic

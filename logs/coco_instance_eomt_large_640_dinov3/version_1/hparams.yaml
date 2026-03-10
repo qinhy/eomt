@@ -1,0 +1,60 @@
+_instantiator: lightning.pytorch.cli.instantiate_module
+attn_mask_annealing_enabled: true
+attn_mask_annealing_end_steps:
+- 29564
+- 44346
+- 59128
+- 73910
+attn_mask_annealing_start_steps:
+- 14782
+- 29564
+- 44346
+- 59128
+batch_size: 8
+bbox_giou_coefficient: 2.0
+bbox_l1_coefficient: 5.0
+check_empty_targets: true
+ckpt_path: null
+class_coefficient: 2.0
+color_jitter_enabled: false
+delta_weights: true
+dice_coefficient: 5.0
+eval_top_k_instances: 100
+img_size:
+- 640
+- 640
+importance_sample_ratio: 0.75
+llrd: 0.8
+llrd_l2_enabled: false
+load_ckpt_class_head: true
+lr: 0.0002
+lr_mult: 1.0
+mask_coefficient: 5.0
+mask_thresh: 0.8
+network:
+  class_path: models.eomt.EoMT
+  init_args:
+    bbox_head_enabled: true
+    encoder:
+      class_path: models.vit.ViT
+      init_args:
+        backbone_name: facebook/dinov3-vitl16-pretrain-lvd1689m
+        patch_size: 16
+    masked_attn_enabled: true
+    num_blocks: 4
+    num_q: 200
+no_object_coefficient: 0.1
+num_classes: 80
+num_points: 12544
+num_workers: 4
+overlap_thresh: 0.8
+oversample_ratio: 3.0
+path: /mnt/d/Downloads/images.cocodataset.org
+poly_power: 0.9
+scale_range:
+- 0.1
+- 2.0
+warmup_steps:
+- 2000
+- 3000
+weight_decay: 0.05

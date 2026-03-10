@@ -2,10 +2,9 @@ trainer:
   max_epochs: 12
   check_val_every_n_epoch: 2
   logger:
-    class_path: lightning.pytorch.loggers.wandb.WandbLogger
+    class_path: lightning.pytorch.loggers.CSVLogger
     init_args:
-      resume: allow
-      project: "eomt"
+      save_dir: logs
       name: "coco_instance_eomt_large_640_dinov3"
 model:
   class_path: training.mask_classification_instance.MaskClassificationInstance

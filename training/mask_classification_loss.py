@@ -166,9 +166,17 @@ class MaskClassificationLoss(Mask2FormerLoss):
         }
 
     def loss_total(self, losses_all_layers, log_fn) -> torch.Tensor:
-        loss_total = None
+        total = None
+
         for loss_key, loss in losses_all_layers.items():
-            log_fn(f"losses/train_{loss_key}", loss, sync_dist=True)
+            # step logging: detach explicitly, and avoid cross-rank sync unless you truly need it
+            log_fn(
+                f"losses/train_{loss_key}",
+                loss.detach(),
+                on_step=True,
+                on_epoch=False,
+                sync_dist=False,
+            )
 
             if "mask" in loss_key:
                 weighted_loss = loss * self.mask_coefficient
@@ -183,11 +191,15 @@ class MaskClassificationLoss(Mask2FormerLoss):
             else:
                 raise ValueError(f"Unknown loss key: {loss_key}")
 
-            if loss_total is None:
-                loss_total = weighted_loss
-            else:
-                loss_total = torch.add(loss_total, weighted_loss)
+            total = weighted_loss if total is None else total + weighted_loss
 
-        log_fn("losses/train_loss_total", loss_total, sync_dist=True, prog_bar=True)
+        log_fn(
+            "losses/train_loss_total",
+            total.detach(),
+            on_step=True,
+            on_epoch=False,
+            sync_dist=False,
+            prog_bar=True,
+        )
 
-        return loss_total  # type: ignore
+        return total

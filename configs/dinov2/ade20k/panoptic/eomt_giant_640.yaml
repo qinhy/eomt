@@ -1,10 +1,9 @@
 trainer:
   max_epochs: 31
   logger:
-    class_path: lightning.pytorch.loggers.wandb.WandbLogger
+    class_path: lightning.pytorch.loggers.CSVLogger
     init_args:
-      resume: allow
-      project: "eomt"
+      save_dir: logs
       name: "ade20k_panoptic_eomt_giant_640"
 model:
   class_path: training.mask_classification_panoptic.MaskClassificationPanoptic
