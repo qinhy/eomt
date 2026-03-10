@@ -15,6 +15,55 @@ import math
 from models.scale_block import ScaleBlock
 from models.vit import ViT
 
+def parameter_to_buffer(
+    module: nn.Module,
+    name: str,
+    *,
+    clone: bool = True,
+    persistent: bool = True,
+):
+    p = getattr(module, name)
+
+    if not isinstance(p, nn.Parameter):
+        raise TypeError(f"{name!r} is not an nn.Parameter")
+
+    t = p.detach()
+    if clone:
+        t = t.clone()
+
+    # Remove from registered parameters
+    delattr(module, name)
+
+    # Re-register under the same name as a buffer
+    module.register_buffer(name, t, persistent=persistent)
+    return module
+
+
+def freeze_module_as_buffers(
+    module: nn.Module,
+    *,
+    clone: bool = True,
+    persistent: bool = True,
+):
+    """
+    Convert every parameter in `module` (including all child submodules)
+    into a buffer under the same attribute name.
+
+    Returns:
+        list[str]: parameter names (relative to `module`) that were converted
+    """
+    # Snapshot names first, because we are going to mutate registrations
+    names = [name for name, _ in module.named_parameters(recurse=True)]
+
+    for full_name in names:
+        *parts, leaf = full_name.split(".")
+        submod = module
+        for part in parts:
+            submod = getattr(submod, part)
+        parameter_to_buffer(submod, leaf, clone=clone, persistent=persistent)
+
+    return names
+
 
 class EoMT(nn.Module):
     def __init__(
@@ -70,14 +119,15 @@ class EoMT(nn.Module):
         )
 
     def freeze_encoder(self):        
-        self.encoder.eval()
-        for param in self.encoder.parameters():
-            param.requires_grad = False
+        # self.encoder.eval()
+        # for param in self.encoder.parameters():
+        #     param.requires_grad = False
+        freeze_module_as_buffers(self.encoder)
 
-    def unfreeze_encoder(self):
-        self.encoder.train()
-        for param in self.encoder.parameters():
-            param.requires_grad = True
+    # def unfreeze_encoder(self):
+    #     self.encoder.train()
+    #     for param in self.encoder.parameters():
+    #         param.requires_grad = True
 
     def _predict(self, x: torch.Tensor):
         q = x[:, : self.num_q, :]
