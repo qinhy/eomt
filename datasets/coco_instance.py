@@ -129,7 +129,7 @@ class COCOInstance(LightningDataModule):
 
     @staticmethod
     def target_parser(
-        polygons_by_id: dict[int, list[list[float]]],
+        polygons_by_id: dict[int, object],
         labels_by_id: dict[int, int],
         is_crowd_by_id: dict[int, bool],
         bboxes_by_id: dict[int, list[float]],
@@ -139,18 +139,33 @@ class COCOInstance(LightningDataModule):
     ):
         masks, labels, is_crowd, boxes = [], [], [], []
 
-        for label_id, cls_id in labels_by_id.items():
+        for ann_id, cls_id in labels_by_id.items():
             if cls_id not in CLASS_MAPPING:
                 continue
 
-            segmentation = polygons_by_id[label_id]
-            rles = coco_mask.frPyObjects(segmentation, height, width)
-            rle = coco_mask.merge(rles) if isinstance(rles, list) else rles
+            # Best practical choice for training
+            if is_crowd_by_id[ann_id]:
+                continue
 
-            masks.append(tv_tensors.Mask(coco_mask.decode(rle), dtype=torch.bool))
+            segmentation = polygons_by_id[ann_id]
+
+            # polygon or RLE
+            if isinstance(segmentation, dict):
+                # already RLE-like
+                rle = segmentation
+            else:
+                rles = coco_mask.frPyObjects(segmentation, height, width)
+                rle = coco_mask.merge(rles) if isinstance(rles, list) else rles
+
+            mask = coco_mask.decode(rle)
+            if mask.ndim == 3:
+                mask = mask.any(axis=2)
+
+            masks.append(tv_tensors.Mask(torch.as_tensor(mask, dtype=torch.bool)))
             labels.append(CLASS_MAPPING[cls_id])
-            is_crowd.append(is_crowd_by_id[label_id])
-            x, y, w, h = bboxes_by_id[label_id]
+            is_crowd.append(False)
+
+            x, y, w, h = bboxes_by_id[ann_id]
             boxes.append([x, y, x + w, y + h])
 
         boxes = tv_tensors.BoundingBoxes(

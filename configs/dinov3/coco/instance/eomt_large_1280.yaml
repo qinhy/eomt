@@ -12,12 +12,12 @@ model:
     attn_mask_annealing_enabled: True
     attn_mask_annealing_start_steps: [14782, 29564, 44346, 59128]
     attn_mask_annealing_end_steps: [29564, 44346, 59128, 73910]
-    bbox_l1_coefficient: 5.0
-    bbox_giou_coefficient: 2.0
     lr: 2e-4
     llrd_l2_enabled: False
     warmup_steps: [2000, 3000]
     delta_weights: True
+    bbox_l1_coefficient: 5.0
+    bbox_giou_coefficient: 2.0
     network:
       class_path: models.eomt.EoMT
       init_args:
@@ -29,3 +29,6 @@ model:
             backbone_name: facebook/dinov3-vitl16-pretrain-lvd1689m
 data:
   class_path: datasets.coco_instance.COCOInstance
+  init_args:
+    img_size: [1280, 1280]
+
