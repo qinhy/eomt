@@ -21,6 +21,7 @@ class ViT(nn.Module):
         ckpt_path: Optional[str] = None,
     ):
         super().__init__()
+        self.backbone_name = backbone_name
 
         if "/" in backbone_name:
             self.backbone = self.transformers_to_timm(
@@ -43,6 +44,11 @@ class ViT(nn.Module):
 
         self.register_buffer("pixel_mean", pixel_mean)
         self.register_buffer("pixel_std", pixel_std)
+        
+        self.grid_size = self.backbone.patch_embed.grid_size
+        self.patch_size = self.backbone.patch_embed.patch_size
+        self.embed_dim = self.backbone.embed_dim
+        self.num_prefix_tokens = self.backbone.num_prefix_tokens
 
     def transformers_to_timm(self, backbone, img_size: tuple[int, int]):
         backbone.patch_embed = backbone.embeddings
@@ -59,10 +65,10 @@ class ViT(nn.Module):
         backbone.num_prefix_tokens = backbone.patch_embed.config.num_register_tokens + 1
         backbone.blocks = backbone.layer
 
-        del (
-            backbone.patch_embed.mask_token,
-            backbone.embeddings,
-            backbone.layer,
-        )
+        # del (
+        #     backbone.patch_embed.mask_token,
+        #     backbone.embeddings,
+        #     backbone.layer,
+        # )
 
         return backbone
