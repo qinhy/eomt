@@ -34,7 +34,7 @@ from torch.nn.functional import interpolate
 from torchvision.transforms.v2.functional import pad
 import logging
 
-from models.eomt import EoMT
+from models import EoMT
 from training.two_stage_warmup_poly_schedule import TwoStageWarmupPolySchedule
 
 bold_green = "\033[1;32m"
@@ -101,12 +101,17 @@ class LightningModule(lightning.LightningModule):
         self.log = torch.compiler.disable(self.log)  # type: ignore
 
     def configure_optimizers(self):
+        if hasattr(self.network.encoder,"backbone"):
+            backbone = self.network.encoder.backbone
+        else:
+            backbone = self.network.encoder
+
         encoder_param_names = {
-            n for n, _ in self.network.encoder.backbone.named_parameters()
+            n for n, _ in backbone.named_parameters()
         }
         backbone_param_groups = []
         other_param_groups = []
-        backbone_blocks = len(self.network.encoder.backbone.blocks)
+        backbone_blocks = len(backbone.blocks)
         block_i = backbone_blocks
 
         l2_blocks = torch.arange(

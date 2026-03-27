@@ -18,7 +18,6 @@ from lightning.pytorch.callbacks import ModelSummary, LearningRateMonitor
 from lightning.pytorch.loops.training_epoch_loop import _TrainingEpochLoop
 from lightning.pytorch.loops.fetchers import _DataFetcher, _DataLoaderIterDataFetcher
 
-from models.eomt import EoMT
 from training.lightning_module import LightningModule
 from datasets.lightning_data_module import LightningDataModule
 
@@ -177,7 +176,7 @@ class LightningCLI(cli.LightningCLI):
         )
         
         model.train()
-        model.network.freeze_encoder()
+        # model.network.freeze_encoder()
         if not self.config[self.config["subcommand"]]["compile_disabled"]:
             model = torch.compile(model)
 

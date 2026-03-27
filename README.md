@@ -133,7 +133,7 @@ python3 main.py fit \
 This command trains the `EoMT-L` model with a 640×640 input size on COCO panoptic segmentation using 4 GPUs. Each GPU processes a batch of 4 images, for a total batch size of 16. Switch to ```dinov3``` in the configuration path to enable the corresponding DINOv3 model.
 
 ```bash
-uv run main.py fit -c configs/dinov3/coco/instance/eomt_large_640.yaml --trainer.devices 1 --data.batch_size 1 --data.path D:/images.cocodataset.org
+uv run main.py fit -c configs/dinov3/coco/instance/eomt_large_640.yaml --trainer.devices 1 --data.batch_size 1 --data.path D:/images.cocodataset.org --compile_disabled
 ```
 
 ✅ Make sure the total batch size is `devices × batch_size = 16`  

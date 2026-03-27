@@ -13,7 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.ops import box_convert, masks_to_boxes
 
-from models.eomt import EoMT
+from models import EoMT
 from training.mask_classification_loss import MaskClassificationLoss
 from training.lightning_module import LightningModule
 

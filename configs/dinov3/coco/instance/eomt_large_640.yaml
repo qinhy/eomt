@@ -18,14 +18,22 @@ model:
     delta_weights: True
     bbox_l1_coefficient: 5.0
     bbox_giou_coefficient: 2.0
+    # network:
+    #   class_path: models.eomt.EoMT
+    #   init_args:
+    #     num_q: 200
+    #     bbox_head_enabled: True
+    #     encoder:
+    #       class_path: models.vit.ViT
+    #       init_args:
+    #         backbone_name: facebook/dinov3-vitl16-pretrain-lvd1689m
     network:
-      class_path: models.eomt.EoMT
+      class_path: models.eomt_dinov3.EoMT
       init_args:
         num_q: 200
         bbox_head_enabled: True
-        encoder:
-          class_path: models.vit.ViT
-          init_args:
-            backbone_name: facebook/dinov3-vitl16-pretrain-lvd1689m
+        encoder_repo: ../dinov3
+        encoder_model: dinov3_vitl16
+        encoder_weights: ../BitNetCNN/data/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth
 data:
   class_path: datasets.coco_instance.COCOInstance
