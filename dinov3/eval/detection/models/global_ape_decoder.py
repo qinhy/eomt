@@ -13,6 +13,8 @@ import torch
 import torch.nn as nn
 import torch.utils.checkpoint as checkpoint
 
+from dinov3.utils.utils import scaled_dot_product_attention
+
 from ..util.misc import _get_activation_fn, _get_clones, inverse_sigmoid
 
 
@@ -58,7 +60,7 @@ class GlobalCrossAttention(nn.Module):
             attn_mask = input_padding_mask[:, None, None] * -100
         attn_mask = attn_mask.contiguous()  # to enable efficient attention
 
-        x = torch.nn.functional.scaled_dot_product_attention(
+        x = scaled_dot_product_attention(
             query=q,
             key=k,
             value=v,

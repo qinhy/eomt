@@ -158,7 +158,7 @@ class EoMT(nn.Module):
         self,
         num_tokens: int,                     # total token count N from x: [B, N, D]
         mask_logits: torch.Tensor,           # [B, num_queries, h, w]
-        patch_grid_size: Tuple[int, int],    # (patch_h, patch_w)
+        grid_size: Tuple[int, int],    # (patch_h, patch_w)
         late_block_idx: int,
     ) -> torch.Tensor:
         idx = self.idx
@@ -171,7 +171,7 @@ class EoMT(nn.Module):
 
         # Resize query masks to the patch-token grid, then flatten spatial dims:
         # [B, Q, H, W] -> [B, Q, patch_h, patch_w] -> [B, Q, num_patches]
-        patch_mask = F.interpolate( mask_logits, size=patch_grid_size, mode="bilinear", align_corners=False,
+        patch_mask = F.interpolate( mask_logits, size=grid_size, mode="bilinear", align_corners=False,
         ).flatten(2)
 
         # Restrict query -> patch attention using the predicted masks.
@@ -231,7 +231,7 @@ class EoMT(nn.Module):
 
         bbox_preds = None
         if self.bbox_head is not None:
-            bbox_preds = self.bbox_head(query_tokens).sigmoid()
+            bbox_preds = self.bbox_head(query_tokens).sigmoid() # normalized cxcywh in [0,1].
         
         if patch_tokens_map_x4 is None:
             if self.upscale is None:
@@ -361,12 +361,7 @@ class EoMT(nn.Module):
 
         x4 = F.interpolate( x, scale_factor=2, mode="bilinear", align_corners=False,)
         x_half = F.interpolate( x, scale_factor=0.5, mode="bilinear", align_corners=False,)
-        mask_logits_per_layer, class_logits_per_layer, bbox_preds_per_layer = self.forward_dinov3(x_half,x4,)
-        mask_logits_per_layer = [
-            F.interpolate(m, scale_factor=2, mode="bilinear", align_corners=False)
-            for m in mask_logits_per_layer
-        ]
-        return mask_logits_per_layer, class_logits_per_layer, bbox_preds_per_layer
+        return self.forward_dinov3(x_half,x4)
 
 # if __name__ == "__main__":
 #     model = EoMT(num_q=200,

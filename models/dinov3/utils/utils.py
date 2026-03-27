@@ -12,6 +12,7 @@ from typing import Callable, List, Optional, Tuple
 import numpy as np
 import torch
 from torch import Tensor, nn
+from torch.nn.attention import sdpa_kernel, SDPBackend
 
 logger = logging.getLogger("dinov3")
 
@@ -128,3 +129,28 @@ def has_batchnorms(model: nn.Module) -> bool:
         if isinstance(module, bn_types):
             return True
     return False
+
+def scaled_dot_product_attention(
+        query: Tensor,
+        key: Tensor,
+        value: Tensor,
+        attn_mask: Tensor | None = None,
+        dropout_p: float = 0.0,
+        is_causal: bool = False,
+        scale: float | None = None,
+        enable_gqa: bool = False,
+    ) -> Tensor:
+    with sdpa_kernel(
+        [SDPBackend.CUDNN_ATTENTION, SDPBackend.FLASH_ATTENTION, SDPBackend.MATH],
+        set_priority=True
+    ):
+        return torch.nn.functional.scaled_dot_product_attention(
+            query,
+            key,
+            value,
+            attn_mask=attn_mask,
+            dropout_p=dropout_p,
+            is_causal=is_causal,
+            scale=scale,
+            enable_gqa=enable_gqa,
+        )

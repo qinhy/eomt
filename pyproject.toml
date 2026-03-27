@@ -21,6 +21,7 @@ dependencies = [
     "pycocotools>=2.0.11",
     'triton-windows>=3.6; platform_system=="Windows"',
     'triton>=3.6; platform_system!="Windows"',
+    "opencv-python>=4.13.0.92",
 ]
 
 [tool.uv]

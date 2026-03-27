@@ -11,6 +11,8 @@ import torch.nn.functional as F
 from dinov3.utils import cat_keep_shapes, uncat_with_shapes
 from torch import Tensor, nn
 
+from dinov3.utils.utils import scaled_dot_product_attention
+
 
 # RoPE-related functions:
 def rope_rotate_half(x: Tensor) -> Tensor:
@@ -113,7 +115,7 @@ class SelfAttention(nn.Module):
         q, k, v = [t.transpose(1, 2) for t in [q, k, v]]
         if rope is not None:
             q, k = self.apply_rope(q, k, rope)
-        x = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+        x = scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
         x = x.transpose(1, 2)
         return x.reshape([B, N, C])
 
@@ -156,7 +158,7 @@ class CausalSelfAttention(nn.Module):
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads)
         q, k, v = torch.unbind(qkv, 2)
         q, k, v = [t.transpose(1, 2) for t in [q, k, v]]
-        x = torch.nn.functional.scaled_dot_product_attention(
+        x = scaled_dot_product_attention(
             q, k, v, attn_mask=None, dropout_p=self.attn_drop if self.training else 0, is_causal=is_causal
         )
         x = x.transpose(1, 2).contiguous().view(B, N, C)

@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from scipy.optimize import linear_sum_assignment
+from torchvision import tv_tensors
 from torchvision.ops import box_convert, generalized_box_iou
 
 from transformers.models.mask2former.modeling_mask2former import (
@@ -65,7 +66,7 @@ class BoxAwareMask2FormerHungarianMatcher(nn.Module):
         mask_labels: List[torch.Tensor],             # list[[Ni, H, W]]
         class_labels: List[torch.Tensor],            # list[[Ni]]
         bbox_queries_preds: Optional[torch.Tensor] = None,   # [B, Q, 4], normalized cxcywh
-        box_labels: Optional[List[torch.Tensor]] = None,     # list[[Ni, 4]], normalized cxcywh
+        box_labels: Optional[List[torch.Tensor]] = None,     # list[[Ni, 4]], normalized cxcywh 0-1
     ):
         batch_size = masks_queries_logits.shape[0]
         device = masks_queries_logits.device
@@ -215,10 +216,11 @@ class MaskClassificationLoss(Mask2FormerLoss):
         """
         box_labels = []
         for target in targets:
-            h, w = target["masks"].shape[-2:]
+            boxes_xyxy:tv_tensors.BoundingBoxes = target["boxes"]
+            h, w = boxes_xyxy.canvas_size
             scale = torch.tensor([w, h, w, h], device=device, dtype=dtype)
 
-            boxes_xyxy = target["boxes"].to(device=device, dtype=dtype)
+            boxes_xyxy = boxes_xyxy.to(device=device, dtype=dtype)
             boxes_cxcywh = box_convert(boxes_xyxy / scale, "xyxy", "cxcywh").clamp(0, 1)
             box_labels.append(boxes_cxcywh)
 
