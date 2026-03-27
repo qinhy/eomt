@@ -34,6 +34,6 @@ model:
         bbox_head_enabled: True
         encoder_repo: ../dinov3
         encoder_model: dinov3_vitl16
-        encoder_weights: ../BitNetCNN/data/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth
+        encoder_weights: ../data/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth
 data:
   class_path: datasets.coco_instance.COCOInstance

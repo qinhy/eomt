@@ -156,57 +156,71 @@ class EoMT(nn.Module):
 
     def _attn_mask(
         self,
-        N:int, # from x of B,N,D
-        mask_logits: torch.Tensor, # B,q,h,w
-        grid_size: Tuple[int,int],
+        num_tokens: int,                     # total token count N from x: [B, N, D]
+        mask_logits: torch.Tensor,           # [B, num_queries, h, w]
+        patch_grid_size: Tuple[int, int],    # (patch_h, patch_w)
         late_block_idx: int,
-    ):
+    ) -> torch.Tensor:
         idx = self.idx
-        B,q,h,w = mask_logits.shape
-        attn_mask = torch.ones(
-            B,N,N,
-            dtype=torch.bool,
-            device=mask_logits.device,
-        )
-        interpolated = F.interpolate(
-            mask_logits,
-            size=grid_size,
-            mode="bilinear",
-            align_corners=False,
-        )
-        interpolated = interpolated.view(interpolated.size(0), interpolated.size(1), -1)
-        attn_mask[:, idx.query_start:idx.query_end, idx.patch_start:] = interpolated > 0
+        batch_size, num_queries, _, _ = mask_logits.shape
 
+        # Start from full attention everywhere.
+        attn_mask = torch.ones(
+            batch_size, num_tokens, num_tokens, dtype=torch.bool, device=mask_logits.device,
+        )
+
+        # Resize query masks to the patch-token grid, then flatten spatial dims:
+        # [B, Q, H, W] -> [B, Q, patch_h, patch_w] -> [B, Q, num_patches]
+        patch_mask = F.interpolate( mask_logits, size=patch_grid_size, mode="bilinear", align_corners=False,
+        ).flatten(2)
+
+        # Restrict query -> patch attention using the predicted masks.
+        attn_mask[ :, idx.query_start:idx.query_end, idx.patch_start:,
+        ] = patch_mask > 0
+
+        # Randomly disable masking for some queries, according to the annealed probability.
+        keep_mask_prob = float(self.attn_mask_probs[late_block_idx])
         attn_mask = self._disable_attn_mask(
-            attn_mask,
-            float(self.attn_mask_probs[late_block_idx]),
-            idx.query_start,
-            idx.query_end,
-            idx.patch_start,
+            attn_mask=attn_mask,
+            keep_mask_prob=keep_mask_prob,
+            query_start=idx.query_start,
+            query_end=idx.query_end,
+            patch_start=idx.patch_start,
         )
         return attn_mask
+
 
     @torch.compiler.disable
     def _disable_attn_mask(
         self,
         attn_mask: torch.Tensor,
-        prob: float,
+        keep_mask_prob: float,
         query_start: int,
         query_end: int,
         patch_start: int,
-    ):
-        if prob < 1:
-            random_queries = (
-                torch.rand(
-                    attn_mask.shape[0],
-                    query_end - query_start,
-                    device=attn_mask.device,
-                ) > prob
-            )
-            attn_mask[:, query_start:query_end, patch_start:][random_queries] = True
+    ) -> torch.Tensor:
+        # keep_mask_prob == 1.0 means masking stays enabled for all queries.
+        if keep_mask_prob >= 1.0:
+            return attn_mask
+
+        batch_size = attn_mask.shape[0]
+        num_queries = query_end - query_start
+
+        # True means: disable masked attention for this query and fall back to full attention.
+        disable_mask_for_query = (
+            torch.rand(batch_size, num_queries, device=attn_mask.device) > keep_mask_prob
+        )
+
+        # View over query -> patch attention region: [B, Q, num_patches]
+        query_to_patch_mask = attn_mask[:, query_start:query_end, patch_start:]
+
+        # If masking is disabled for a query, allow attention to all patches.
+        # True = allowed attention
+        # False = blocked attention
+        query_to_patch_mask[disable_mask_for_query] = True
 
         return attn_mask
-
+    
     def _predict(
         self,
         query_tokens: torch.Tensor,
