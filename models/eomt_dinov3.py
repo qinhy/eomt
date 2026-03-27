@@ -249,7 +249,6 @@ class EoMT(nn.Module):
         return mask_logits, class_logits, bbox_preds
 
     def forward_dinov3_phase1(self, x: torch.Tensor):
-        B, C, H, W = x.shape
         backbone: DinoVisionTransformer = self.encoder
         num_layers = len(backbone.blocks)
         if not (1 <= self.num_blocks <= num_layers):
@@ -261,8 +260,8 @@ class EoMT(nn.Module):
         early_layers = backbone.blocks[:split_idx]
         late_layers = backbone.blocks[split_idx:]
 
-        x,(H,W) = backbone.prepare_tokens_with_masks(x)# [CLS][registers][patches]
-        rope = backbone.rope_embed(H=H, W=W)
+        x,(Hp,Wp) = backbone.prepare_tokens_with_masks(x)# [CLS][registers][patches]
+        rope = backbone.rope_embed(H=Hp, W=Wp)
         for block in early_layers:
             block: SelfAttentionBlock = block
             x = block._forward(x, rope=rope)
