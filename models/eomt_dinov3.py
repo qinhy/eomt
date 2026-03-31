@@ -14,7 +14,7 @@ import math
 
 from dinov3.layers.block import SelfAttentionBlock
 from dinov3.models.vision_transformer import DinoVisionTransformer, vit_small
-from models.scale_block import ScaleBlock
+from models.scale_block import ScaleBlock, build_or_load_fsrcnn_x2
 
 def parameter_to_buffer(
     module: nn.Module,
@@ -95,7 +95,8 @@ class EoMT(nn.Module):
         num_blocks=4,
         masked_attn_enabled=True,
         bbox_head_enabled=False,
-        upscale=False,        
+        upscale=False,
+        fsrcnnx2=False,
         encoder_repo='../dinov3',
         encoder_model='dinov3_vitl16',
     ):
@@ -109,6 +110,10 @@ class EoMT(nn.Module):
         self.masked_attn_enabled = masked_attn_enabled
         self.bbox_head_enabled = bbox_head_enabled
         D = self.encoder.embed_dim
+        self.fsrcnnx2 = None
+        if fsrcnnx2:
+            self.fsrcnnx2 = build_or_load_fsrcnn_x2(checkpoint_path="./data/fsrcnn_x2.pth")
+            freeze_module_as_buffers(self.fsrcnnx2)
 
         self.register_buffer("attn_mask_probs", torch.ones(num_blocks))
 
@@ -234,9 +239,10 @@ class EoMT(nn.Module):
             bbox_preds = self.bbox_head(query_tokens).sigmoid() # normalized cxcywh in [0,1].
         
         if patch_tokens_map_x2 is None:
-            if self.upscale is None:
-                patch_tokens_map_x2 = patch_tokens_map
-            patch_tokens_map_x2 = self.upscale(patch_tokens_map)
+            if self.upscale is not None:
+                patch_tokens_map_x2 = self.upscale(patch_tokens_map)
+            else:
+                patch_tokens_map_x2 = patch_tokens_map            
 
         query_mask_feats = self.mask_head(query_tokens)
         mask_logits = torch.einsum("bqc,bchw->bqhw", query_mask_feats, patch_tokens_map_x2)
@@ -339,6 +345,9 @@ class EoMT(nn.Module):
         x: torch.Tensor,
         x2: Optional[torch.Tensor] = None,
     ):
+        # all input x must be 0-1, uint8/255.0
+        if self.fsrcnnx2:
+            x2 = self.fsrcnnx2(x)
         x = self._normalize_image(x)
         x2 = self._normalize_image(x2)
 

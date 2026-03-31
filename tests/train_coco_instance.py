@@ -62,7 +62,7 @@ def _default_encoder_repo() -> Path:
 
 def _default_encoder_weights() -> Path:
     return (
-        REPO_ROOT / "../BitNetCNN/data/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth"
+        REPO_ROOT / "../BitNetCNN/data/dinov3_vits16_pretrain_lvd1689m-08c60483.pth"
     ).resolve()
 
 
@@ -120,7 +120,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--encoder-repo", type=Path, default=_default_encoder_repo())
     parser.add_argument(
         "--encoder-model",
-        default="dinov3_vitl16",
+        default="dinov3_vits16",
     )
     parser.add_argument(
         "--encoder-weights",
@@ -255,6 +255,7 @@ def build_model(args: argparse.Namespace) -> MaskClassificationInstance:
         bbox_head_enabled=True,
         encoder_repo=str(args.encoder_repo),
         encoder_model=args.encoder_model,
+        fsrcnnx2=True,
     )
     return MaskClassificationInstance(
         network=network,
