@@ -35,6 +35,7 @@ from torchvision.transforms.v2.functional import pad
 import logging
 
 from models import EoMT
+from training.mask_classification_loss import MaskClassificationLoss
 from training.two_stage_warmup_poly_schedule import TwoStageWarmupPolySchedule
 
 bold_green = "\033[1;32m"
@@ -76,6 +77,8 @@ class LightningModule(lightning.LightningModule):
         self.poly_power = poly_power
         self.warmup_steps = warmup_steps
         self.llrd_l2_enabled = llrd_l2_enabled
+
+        self.criterion:MaskClassificationLoss = None
 
         self.strict_loading = False
 
@@ -174,10 +177,16 @@ class LightningModule(lightning.LightningModule):
             },
         }
 
-    def forward(self, imgs):
-        x = imgs / 255.0
+    def forward(self, imgs, imgs2=None):
+        assert imgs.dtype == torch.int8, "input image should be raw int8 images"
 
-        return self.network(x)
+        x = imgs / 255.0
+        x2 = None
+
+        if imgs2 is not None:
+            x2 = imgs2 / 255.0
+
+        return self.network.forward(x,x2)
 
     def training_step(self, batch, batch_idx):
         imgs, targets = batch

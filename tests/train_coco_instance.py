@@ -14,8 +14,8 @@ model = EoMT(num_q=200,
                 encoder_weights='../BitNetCNN/data/dinov3_vits16_pretrain_lvd1689m-08c60483.pth'
         ).cuda()
 with torch.inference_mode(), torch.autocast("cuda", dtype=torch.float16):
-    img = torch.randn(1, 3, 2880, 2880).cuda()
-    res = model(img)
+    img = torch.randn(1, 3, 1280, 1280).cuda()
+    res = model.forward(img)
 print(res)
 
 # dinov3_vits16
@@ -24,34 +24,40 @@ print(res)
 # 640 3GB
 # 720 3.5GB
 
-# dataset = COCOInstance(path="D:/images.cocodataset.org",num_workers=0,batch_size=1)
-# dataset.setup()
-# tl = dataset.train_dataloader()
-# batch = next(iter(tl))
-# imgs,targets = batch
-# imgs = imgs.cuda()
+dataset = COCOInstance(path="D:/images.cocodataset.org",num_workers=0,batch_size=1)
+dataset.setup()
+vl = dataset.val_dataloader()
+batch = next(iter(vl))
+imgs,targets = batch
+tl = dataset.train_dataloader()
+batch = next(iter(tl))
+imgs,targets = batch
+imgs = imgs.cuda()
 
-# masks, labels, is_crowd, boxes = targets[0]["masks"], targets[0]["labels"], targets[0]["is_crowd"], targets[0]["boxes"]
-# vis = COCOInstance.draw_one(imgs[0], masks, labels, is_crowd, boxes)
-# mask_logits_per_block, class_logits_per_block, bbox_preds_per_block = model(imgs)
+masks, labels, is_crowd, boxes = targets[0]["masks"], targets[0]["labels"], targets[0]["is_crowd"], targets[0]["boxes"]
+vis = COCOInstance.draw_one(imgs[0], masks, labels, is_crowd, boxes)
+imgs1280 = None
+if "1280" in targets[0] and imgs[0].shape[-1] != 1280:
+    imgs1280 = torch.cat([t["1280"] for t in targets]).cuda()/255.0
+mask_logits_per_block, class_logits_per_block, bbox_preds_per_block = model.forward(imgs/255.0,imgs1280)
 
 
-# criterion = MaskClassificationLoss(num_points=12544,
-#                                     oversample_ratio=3.0,
-#                                     importance_sample_ratio=0.75,
-#                                     mask_coefficient=5.0,
-#                                     dice_coefficient=5.0,
-#                                     class_coefficient=2.0,
-#                                     num_labels=80,
-#                                     no_object_coefficient=0.1,
-#                                     bbox_l1_coefficient=5.0,
-#                                     bbox_giou_coefficient=2.0).cuda()
+criterion = MaskClassificationLoss(num_points=12544,
+                                    oversample_ratio=3.0,
+                                    importance_sample_ratio=0.75,
+                                    mask_coefficient=5.0,
+                                    dice_coefficient=5.0,
+                                    class_coefficient=2.0,
+                                    num_labels=80,
+                                    no_object_coefficient=0.1,
+                                    bbox_l1_coefficient=5.0,
+                                    bbox_giou_coefficient=2.0).cuda()
 
-# losses = criterion(masks_queries_logits=mask_logits_per_block[-1],
-#                     class_queries_logits=class_logits_per_block[-1],
-#                     bbox_queries_preds=bbox_preds_per_block[-1],
-#                     targets=targets)
-# print(losses)
+losses = criterion(masks_queries_logits=mask_logits_per_block[-1],
+                    class_queries_logits=class_logits_per_block[-1],
+                    bbox_queries_preds=bbox_preds_per_block[-1],
+                    targets=targets)
+print(losses)
 
 
 # with torch.no_grad():

@@ -225,7 +225,7 @@ class EoMT(nn.Module):
         self,
         query_tokens: torch.Tensor,
         patch_tokens_map: torch.Tensor,
-        patch_tokens_map_x4: Optional[torch.Tensor] = None,
+        patch_tokens_map_x2: Optional[torch.Tensor] = None,
     ):
         class_logits = self.class_head(query_tokens)
 
@@ -233,18 +233,13 @@ class EoMT(nn.Module):
         if self.bbox_head is not None:
             bbox_preds = self.bbox_head(query_tokens).sigmoid() # normalized cxcywh in [0,1].
         
-        if patch_tokens_map_x4 is None:
+        if patch_tokens_map_x2 is None:
             if self.upscale is None:
-                raise RuntimeError(
-                    "patch_tokens_map_x4 is None and self.upscale is None. "
-                    "Provide x4 features or enable the upscale module."
-                )
-            patch_tokens_map_x4 = self.upscale(patch_tokens_map)
-        else:
-            patch_tokens_map_x4 = patch_tokens_map_x4
+                patch_tokens_map_x2 = patch_tokens_map
+            patch_tokens_map_x2 = self.upscale(patch_tokens_map)
 
         query_mask_feats = self.mask_head(query_tokens)
-        mask_logits = torch.einsum("bqc,bchw->bqhw", query_mask_feats, patch_tokens_map_x4)
+        mask_logits = torch.einsum("bqc,bchw->bqhw", query_mask_feats, patch_tokens_map_x2)
 
         return mask_logits, class_logits, bbox_preds
 
@@ -270,7 +265,7 @@ class EoMT(nn.Module):
     def forward_dinov3(
         self,
         x: torch.Tensor,
-        x4: Optional[torch.Tensor] = None,
+        x2: Optional[torch.Tensor] = None,
     ):
         backbone: DinoVisionTransformer = self.encoder
         B, C, H, W = x.shape
@@ -279,10 +274,10 @@ class EoMT(nn.Module):
         x, late_layers, rope = self.forward_dinov3_phase1(x)
         grid_size = (H // self.patch_size, W // self.patch_size)
 
-        if x4 is not None:            
-            _, _, H4, W4 = x4.shape
-            x4, _, x4_rope = self.forward_dinov3_phase1(x4)            
-            grid_size_x4 = (H4 // self.patch_size, W4 // self.patch_size)
+        if x2 is not None:            
+            _, _, H4, W4 = x2.shape
+            x2, _, x2_rope = self.forward_dinov3_phase1(x2)            
+            grid_size_x2 = (H4 // self.patch_size, W4 // self.patch_size)
             
         query_tokens = self.q.weight.unsqueeze(0).expand(B, -1, -1)
         x = torch.cat([query_tokens, x], dim=1)
@@ -297,13 +292,13 @@ class EoMT(nn.Module):
             if self.masked_attn_enabled:
                 norm_x = backbone.norm(x)
 
-                if x4 is not None:
-                    norm_x4 = backbone.norm(x4)
+                if x2 is not None:
+                    norm_x2 = backbone.norm(x2)
                     
                 mask_logits, class_logits, bbox_preds = self._predict(
                     query_tokens=norm_x[:,idx.query_start:idx.query_end],
                     patch_tokens_map=token2map(norm_x[:,idx.patch_start:],grid_size),
-                    patch_tokens_map_x4=token2map(norm_x4[:,self.num_backbone_prefix_tokens:] if x4 is not None else None, grid_size_x4),
+                    patch_tokens_map_x2=token2map(norm_x2[:,self.num_backbone_prefix_tokens:] if x2 is not None else None, grid_size_x2),
                 )
                 res.append((mask_logits, class_logits, bbox_preds))
 
@@ -319,18 +314,18 @@ class EoMT(nn.Module):
 
             x = block._forward(x,rope,layer_attn_mask)
             # x = block(x, layer_attn_mask, position_embeddings=rope)
-            if x4 is not None:
-                x4 = block._forward(x4,x4_rope)
-                # x4 = block(x4, None, position_embeddings=x4_rope)
+            if x2 is not None:
+                x2 = block._forward(x2,x2_rope)
+                # x2 = block(x2, None, position_embeddings=x2_rope)
 
         norm_x = backbone.norm(x)
-        if x4 is not None:
-            norm_x4 = backbone.norm(x4)
+        if x2 is not None:
+            norm_x2 = backbone.norm(x2)
 
         mask_logits, class_logits, bbox_preds = self._predict(
             query_tokens=norm_x[:,idx.query_start:idx.query_end],
             patch_tokens_map=token2map(norm_x[:,idx.patch_start:],grid_size),
-            patch_tokens_map_x4=token2map(norm_x4[:,self.num_backbone_prefix_tokens:] if x4 is not None else None, grid_size_x4),
+            patch_tokens_map_x2=token2map(norm_x2[:,self.num_backbone_prefix_tokens:] if x2 is not None else None, grid_size_x2),
         )
         res.append((mask_logits, class_logits, bbox_preds))
 
@@ -343,33 +338,27 @@ class EoMT(nn.Module):
         self,
         x: torch.Tensor,
         x2: Optional[torch.Tensor] = None,
-        x4: Optional[torch.Tensor] = None,
     ):
         x = self._normalize_image(x)
         x2 = self._normalize_image(x2)
-        x4 = self._normalize_image(x4)
-
-        if x4 is not None:
-            return self.forward_dinov3(x, x4)
 
         if x2 is not None:
-            x4_from_x2 = F.interpolate(x2,scale_factor=2,mode="bilinear",align_corners=False,)
-            return self.forward_dinov3(x, x4_from_x2)
+            return self.forward_dinov3(x, x2)
 
         if self.upscale is not None:
             return self.forward_dinov3(x)
 
-        x4 = F.interpolate( x, scale_factor=2, mode="bilinear", align_corners=False,)
-        x_half = F.interpolate( x, scale_factor=0.5, mode="bilinear", align_corners=False,)
-        return self.forward_dinov3(x_half,x4)
+        return self.forward_dinov3(x,x)
 
 # if __name__ == "__main__":
 #     model = EoMT(num_q=200,
 #                  num_classes=80,
 #                  bbox_head_enabled=True,
 #                  encoder_repo='../dinov3',
-#                  encoder_model='dinov3_vitl16',
-#                  encoder_weights='../BitNetCNN/data/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth'
+#                 #  encoder_model='dinov3_vitl16',
+#                 #  encoder_weights='../BitNetCNN/data/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth'
+#                  encoder_model='dinov3_vits16',
+#                  encoder_weights='../BitNetCNN/data/dinov3_vits16_pretrain_lvd1689m-08c60483.pth'
 #                 #  encoder=torch.hub.load('../dinov3', 'dinov3_vitl16', source='local',
 #                 #                     weights='../BitNetCNN/data/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth')                
 #                 #  encoder=torch.hub.load('../dinov3', 'dinov3_vits16', source='local',
