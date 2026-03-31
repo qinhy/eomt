@@ -20,7 +20,6 @@ class Transforms(nn.Module):
         img_size: tuple[int, int],
         color_jitter_enabled: bool,
         scale_range: tuple[float, float],
-        process_size: tuple[int, int] | None = (1280,1280),
         max_brightness_delta: int = 32,
         max_contrast_factor: float = 0.5,
         saturation_factor: float = 0.5,
@@ -29,7 +28,6 @@ class Transforms(nn.Module):
         super().__init__()
 
         self.img_size = img_size
-        self.process_size = process_size
         self.color_jitter_enabled = color_jitter_enabled
         self.max_brightness_factor = max_brightness_delta / 255.0
         self.max_contrast_factor = max_contrast_factor
@@ -37,14 +35,8 @@ class Transforms(nn.Module):
         self.max_hue_delta = max_hue_delta / 360.0
 
         self.random_horizontal_flip = T.RandomHorizontalFlip()
-        self.scale_jitter = T.ScaleJitter(target_size=process_size, scale_range=scale_range)
-        self.random_crop = T.RandomCrop(process_size)
-        # Final resize only if internal working size differs from final output size
-        self.final_resize = (
-            T.Resize(self.img_size)
-            if self.process_size != self.img_size
-            else None
-        )
+        self.scale_jitter = T.ScaleJitter(target_size=img_size, scale_range=scale_range)
+        self.random_crop = T.RandomCrop(img_size)
 
     def _random_factor(self, factor: float, center: float = 1.0):
         return torch.empty(1).uniform_(center - factor, center + factor).item()
@@ -92,14 +84,12 @@ class Transforms(nn.Module):
     def pad(
         self, img: Tensor, target: dict[str, Any]
     ) -> tuple[Tensor, dict[str, Union[Tensor, TVTensor]]]:
-        pad_h = max(0, self.process_size[-2] - img.shape[-2])
-        pad_w = max(0, self.process_size[-1] - img.shape[-1])
+        pad_h = max(0, self.img_size[-2] - img.shape[-2])
+        pad_w = max(0, self.img_size[-1] - img.shape[-1])
         padding = [0, 0, pad_w, pad_h]
 
         img = F.pad(img, padding)
         target["masks"] = F.pad(target["masks"], padding)
-        if "boxes" in target:
-            target["boxes"] = F.pad(target["boxes"], padding)
 
         return img, target
 
@@ -119,14 +109,10 @@ class Transforms(nn.Module):
         img, target = self.pad(img, target)
         img, target = self.random_crop(img, target)
 
-        if self.final_resize is not None:
-            img1280 = img.clone()
-            img, target = self.final_resize(img, target)        
-
         valid = target["masks"].flatten(1).any(1)
         if not valid.any():
             return self(img_orig, target_orig)
 
         target = self._filter(target, valid)
-        target['1280'] = img1280
+
         return img, target

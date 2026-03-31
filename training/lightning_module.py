@@ -190,8 +190,10 @@ class LightningModule(lightning.LightningModule):
 
     def training_step(self, batch, batch_idx):
         imgs, targets = batch
-
-        mask_logits_per_block, class_logits_per_block, bbox_preds_per_block = self(imgs)
+        imgs1280 = None
+        if torch.rand(1).item() > 0.5:
+            imgs1280 = torch.cat([t["1280"] for t in targets])
+        mask_logits_per_block, class_logits_per_block, bbox_preds_per_block = self(imgs,imgs1280)
 
         losses_all_blocks = {}
         for i, (mask_logits, class_logits, bbox_preds) in enumerate(

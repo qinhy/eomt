@@ -177,7 +177,98 @@ class MaskClassificationInstance(LightningModule):
                 )
 
             self.update_metrics_instance(preds, targets_, i)
+    
+    def eval_step(
+        self,
+        batch,
+        batch_idx=None,
+        log_prefix=None,
+    ):
+        imgs, targets = batch
 
+        for img, target in zip(imgs, targets):
+            img_size = img.shape[-2:]  # (H, W)
+
+            # batch size 1
+            img_in = img.unsqueeze(0)
+
+            mask_logits_per_layer, class_logits_per_layer, bbox_preds_per_layer = self(img_in)
+
+            for i, (mask_logits, class_logits, bbox_preds) in enumerate(
+                zip(mask_logits_per_layer, class_logits_per_layer, bbox_preds_per_layer)
+            ):
+                # resize predicted masks directly to original image size
+                mask_logits = F.interpolate(
+                    mask_logits,
+                    size=img_size,
+                    mode="bilinear",
+                    align_corners=False,
+                )
+
+                scores = class_logits[0].softmax(dim=-1)[:, :-1]
+
+                labels = (
+                    torch.arange(scores.shape[-1], device=scores.device)
+                    .unsqueeze(0)
+                    .repeat(scores.shape[0], 1)
+                    .flatten(0, 1)
+                )
+
+                topk_scores, topk_indices = scores.flatten(0, 1).topk(
+                    self.eval_top_k_instances, sorted=False
+                )
+                labels = labels[topk_indices]
+
+                query_indices = topk_indices // scores.shape[-1]
+                mask_logits_img = mask_logits[0][query_indices]
+
+                masks = mask_logits_img > 0
+                mask_scores = (
+                    mask_logits_img.sigmoid().flatten(1) * masks.flatten(1)
+                ).sum(1) / (masks.flatten(1).sum(1) + 1e-6)
+                scores = topk_scores * mask_scores
+
+                if bbox_preds is not None:
+                    bbox_preds_img = bbox_preds[0][query_indices]
+                    boxes = box_convert(bbox_preds_img, "cxcywh", "xyxy").clamp(0, 1)
+
+                    scale = torch.tensor(
+                        [img_size[1], img_size[0], img_size[1], img_size[0]],
+                        device=boxes.device,
+                        dtype=boxes.dtype,
+                    )
+                    boxes = boxes * scale
+                else:
+                    boxes = masks_to_boxes(masks.float())
+
+                preds = [
+                    dict(
+                        masks=masks,
+                        labels=labels,
+                        scores=scores,
+                        boxes=boxes,
+                    )
+                ]
+
+                if "boxes" in target:
+                    target_boxes = target["boxes"].to(
+                        device=self.device,
+                        dtype=torch.float32,
+                    )
+                else:
+                    target_boxes = masks_to_boxes(target["masks"].float())
+
+                targets_ = [
+                    dict(
+                        masks=target["masks"],
+                        labels=target["labels"],
+                        boxes=target_boxes,
+                        iscrowd=target["is_crowd"],
+                    )
+                ]
+
+                self.update_metrics_instance(preds, targets_, i)
+                
     def on_validation_epoch_end(self):
         self._on_eval_epoch_end_instance("val")
 
