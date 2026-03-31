@@ -104,57 +104,58 @@ class LightningModule(lightning.LightningModule):
         self.log = torch.compiler.disable(self.log)  # type: ignore
 
     def configure_optimizers(self):
-        if hasattr(self.network.encoder,"backbone"):
-            backbone = self.network.encoder.backbone
-        else:
-            backbone = self.network.encoder
+        backbone = getattr(self.network.encoder, "backbone", self.network.encoder)
 
-        encoder_param_names = {
-            n for n, _ in backbone.named_parameters()
-        }
+        # Map backbone params by object identity instead of relying on name prefixes.
+        backbone_name_by_id = {id(param): name for name, param in backbone.named_parameters()}
+        backbone_param_ids = set(backbone_name_by_id.keys())
+
         backbone_param_groups = []
         other_param_groups = []
+
         backbone_blocks = len(backbone.blocks)
-        block_i = backbone_blocks
+        l2_blocks = set(
+            range(backbone_blocks - self.network.num_blocks, backbone_blocks)
+        )
 
-        l2_blocks = torch.arange(
-            backbone_blocks - self.network.num_blocks, backbone_blocks
-        ).tolist()
-
-        for name, param in reversed(list(self.named_parameters())):
+        for full_name, param in reversed(list(self.named_parameters())):
             lr = self.lr
 
-            if name.replace("network.encoder.backbone.", "") in encoder_param_names:
-                name_list = name.split(".")
+            if id(param) in backbone_param_ids:
+                local_name = backbone_name_by_id[id(param)]
+                name_parts = local_name.split(".")
 
                 is_block = False
-                for i, key in enumerate(name_list):
-                    if key == "blocks":
-                        block_i = int(name_list[i + 1])
-                        is_block = True
+                block_i = None
 
-                if is_block or block_i == 0:
+                for i, key in enumerate(name_parts):
+                    if key == "blocks" and i + 1 < len(name_parts):
+                        block_i = int(name_parts[i + 1])
+                        is_block = True
+                        break
+
+                # Apply layer-wise LR decay for transformer blocks.
+                if is_block:
                     lr *= self.llrd ** (backbone_blocks - 1 - block_i)
 
-                elif (is_block or block_i == 0) and self.lr_mult != 1.0:
-                    lr *= self.lr_mult
-
-                if "backbone.norm" in name:
+                # Keep norm at base LR.
+                if local_name == "norm" or local_name.startswith("norm.") or "backbone.norm" in full_name:
                     lr = self.lr
 
+                # Reset LR for last-stage blocks under the same conditions as your original code.
                 if (
                     is_block
-                    and (block_i in l2_blocks)
+                    and block_i in l2_blocks
                     and ((not self.llrd_l2_enabled) or (self.lr_mult != 1.0))
                 ):
                     lr = self.lr
 
                 backbone_param_groups.append(
-                    {"params": [param], "lr": lr, "name": name}
+                    {"params": [param], "lr": lr, "name": full_name}
                 )
             else:
                 other_param_groups.append(
-                    {"params": [param], "lr": self.lr, "name": name}
+                    {"params": [param], "lr": self.lr, "name": full_name}
                 )
 
         param_groups = backbone_param_groups + other_param_groups
@@ -176,7 +177,7 @@ class LightningModule(lightning.LightningModule):
                 "frequency": 1,
             },
         }
-
+    
     def forward(self, imgs, imgs2=None):
         assert imgs.dtype == torch.uint8, "input image should be raw uint8 images"
 
