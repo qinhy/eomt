@@ -59,6 +59,7 @@ class Dataset(torch.utils.data.Dataset):
         self.polygons_by_id = {}
         self.is_crowd_by_id = {}
         self.bboxes_by_id = {}
+        self.image_sizes_by_name = {}
 
         if annotations_json_path_in_zip is not None:
             with zipfile.ZipFile(target_zip_path or zip_path) as outer_target_zip:
@@ -67,9 +68,13 @@ class Dataset(torch.utils.data.Dataset):
                 ) as file:
                     annotation_data = json.load(file)
 
-            image_id_to_file_name = {
-                image["id"]: image["file_name"] for image in annotation_data["images"]
-            }
+            image_id_to_file_name = {}
+            for image in annotation_data["images"]:
+                image_id_to_file_name[image["id"]] = image["file_name"]
+                self.image_sizes_by_name[image["file_name"]] = (
+                    image["width"],
+                    image["height"],
+                )
 
             for annotation in annotation_data["annotations"]:
                 img_filename = image_id_to_file_name[annotation["image_id"]]
@@ -135,6 +140,19 @@ class Dataset(torch.utils.data.Dataset):
 
                 if not self.labels_by_id[img_path.name]:
                     continue
+
+                if check_empty_targets and only_annotations_json:
+                    width, height = self.image_sizes_by_name[img_path.name]
+                    parsed_target = self.target_parser(
+                        polygons_by_id=self.polygons_by_id.get(img_path.name, {}),
+                        labels_by_id=self.labels_by_id.get(img_path.name, {}),
+                        is_crowd_by_id=self.is_crowd_by_id.get(img_path.name, {}),
+                        bboxes_by_id=self.bboxes_by_id.get(img_path.name, {}),
+                        width=width,
+                        height=height,
+                    )
+                    if not parsed_target[1]:
+                        continue
             else:
                 if target_filename not in target_zip_filenames:
                     continue
@@ -222,10 +240,17 @@ class Dataset(torch.utils.data.Dataset):
         else:
             raise ValueError("target_parser must return 3 or 4 values")
 
+        if masks:
+            mask_tensor = tv_tensors.Mask(torch.stack(masks))
+        else:
+            mask_tensor = tv_tensors.Mask(
+                torch.empty((0, *img.shape[-2:]), dtype=torch.bool)
+            )
+
         target = {
-            "masks": tv_tensors.Mask(torch.stack(masks)),
-            "labels": torch.tensor(labels),
-            "is_crowd": torch.tensor(is_crowd),
+            "masks": mask_tensor,
+            "labels": torch.tensor(labels, dtype=torch.long),
+            "is_crowd": torch.tensor(is_crowd, dtype=torch.bool),
         }
         if boxes is not None:
             target["boxes"] = boxes

@@ -6,6 +6,7 @@
 # used under the Apache 2.0 License.
 # ---------------------------------------------------------------
 
+from pathlib import Path
 from typing import List, Optional, Tuple
 import torch
 import torch.nn as nn
@@ -15,6 +16,9 @@ import math
 from dinov3.layers.block import SelfAttentionBlock
 from dinov3.models.vision_transformer import DinoVisionTransformer, vit_small
 from models.scale_block import ScaleBlock, build_or_load_fsrcnn_x2
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+FSRCNN_X2_WEIGHTS = REPO_ROOT / "data" / "fsrcnn_x2.pth"
 
 def parameter_to_buffer(
     module: nn.Module,
@@ -112,7 +116,9 @@ class EoMT(nn.Module):
         D = self.encoder.embed_dim
         self.fsrcnnx2 = None
         if fsrcnnx2:
-            self.fsrcnnx2 = build_or_load_fsrcnn_x2(checkpoint_path="./data/fsrcnn_x2.pth")
+            self.fsrcnnx2 = build_or_load_fsrcnn_x2(
+                checkpoint_path=str(FSRCNN_X2_WEIGHTS)
+            )
             freeze_module_as_buffers(self.fsrcnnx2)
 
         self.register_buffer("attn_mask_probs", torch.ones(num_blocks))

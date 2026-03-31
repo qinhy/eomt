@@ -11,7 +11,6 @@ from torch.utils.data import DataLoader
 from torchvision import tv_tensors
 from pycocotools import mask as coco_mask
 import torch
-import cv2
 
 from datasets.lightning_data_module import LightningDataModule
 from datasets.transforms import Transforms
@@ -241,6 +240,13 @@ class COCOInstance(LightningDataModule):
         Returns:
             np.ndarray: RGB uint8 image, shape (H,W,3)
         """
+        try:
+            import cv2
+        except ModuleNotFoundError as exc:
+            raise ModuleNotFoundError(
+                "OpenCV is only required for COCOInstance.draw_one(). "
+                "Install `opencv-python` to use this visualization helper."
+            ) from exc
 
         def to_numpy_image(x):
             if isinstance(x, torch.Tensor):

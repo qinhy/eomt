@@ -104,6 +104,7 @@ class Transforms(nn.Module):
         img_orig, target_orig = img, target
 
         target = self._filter(target, ~target["is_crowd"])
+        target_was_empty = target["masks"].shape[0] == 0
 
         img = self.color_jitter(img)
         img, target = self.random_horizontal_flip(img, target)
@@ -113,6 +114,8 @@ class Transforms(nn.Module):
 
         valid = target["masks"].flatten(1).any(1)
         if not valid.any():
+            if target_was_empty:
+                return img, target
             return self(img_orig, target_orig)
 
         target = self._filter(target, valid)

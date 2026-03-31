@@ -4,7 +4,6 @@ import warnings
 from pathlib import Path
 from types import MethodType
 
-import cv2
 import torch
 from lightning.fabric.utilities.seed import seed_everything
 from lightning.pytorch import Trainer
@@ -17,7 +16,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from training.mask_classification_loss import MaskClassificationLoss
 from datasets.coco_instance import COCOInstance
 from models.eomt_dinov3 import EoMT
 from training.mask_classification_instance import MaskClassificationInstance
@@ -96,6 +94,13 @@ def _validate_paths(args: argparse.Namespace) -> None:
     if args.ckpt_path is not None and not args.ckpt_path.exists():
         raise FileNotFoundError(
             f"Model checkpoint does not exist: {args.ckpt_path}"
+        )
+    if (
+        args.resume_from_checkpoint is not None
+        and not args.resume_from_checkpoint.exists()
+    ):
+        raise FileNotFoundError(
+            f"Resume checkpoint does not exist: {args.resume_from_checkpoint}"
         )
 
 
@@ -385,6 +390,8 @@ if __name__ == "__main__":
     # 320 900MB
     # 640 3GB
     # 720 3.5GB
+    import cv2
+    from training.mask_classification_loss import MaskClassificationLoss
 
     dataset = COCOInstance(path="D:/images.cocodataset.org",num_workers=0,batch_size=1)
     dataset.setup()
