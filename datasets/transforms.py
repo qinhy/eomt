@@ -37,6 +37,7 @@ class Transforms(nn.Module):
         self.random_horizontal_flip = T.RandomHorizontalFlip()
         self.scale_jitter = T.ScaleJitter(target_size=img_size, scale_range=scale_range)
         self.random_crop = T.RandomCrop(img_size)
+        self.final_resize = T.Resize(self.img_size)
 
     def _random_factor(self, factor: float, center: float = 1.0):
         return torch.empty(1).uniform_(center - factor, center + factor).item()
@@ -90,6 +91,8 @@ class Transforms(nn.Module):
 
         img = F.pad(img, padding)
         target["masks"] = F.pad(target["masks"], padding)
+        if "boxes" in target:
+            target["boxes"] = F.pad(target["boxes"], padding)
 
         return img, target
 
@@ -108,6 +111,7 @@ class Transforms(nn.Module):
         img, target = self.scale_jitter(img, target)
         img, target = self.pad(img, target)
         img, target = self.random_crop(img, target)
+        img, target = self.final_resize(img, target)
 
         valid = target["masks"].flatten(1).any(1)
         if not valid.any():
