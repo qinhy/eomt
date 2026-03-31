@@ -178,7 +178,7 @@ class LightningModule(lightning.LightningModule):
         }
 
     def forward(self, imgs, imgs2=None):
-        assert imgs.dtype == torch.int8, "input image should be raw int8 images"
+        assert imgs.dtype == torch.uint8, "input image should be raw uint8 images"
 
         x = imgs / 255.0
         x2 = None

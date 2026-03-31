@@ -34,10 +34,10 @@ class BoxAwareMask2FormerHungarianMatcher(nn.Module):
 
     def __init__(
         self,
-        num_points: int,
-        cost_mask: float,
-        cost_dice: float,
-        cost_class: float,
+        num_points: int = 12544,
+        cost_class: float = 1.0,
+        cost_mask: float = 1.0,
+        cost_dice: float = 1.0,
         cost_bbox: float = 0.0,
         cost_giou: float = 0.0,
     ):
@@ -327,6 +327,13 @@ class MaskClassificationLoss(Mask2FormerLoss):
 
     def loss_total(self, losses_all_layers, log_fn) -> torch.Tensor:
         total = None
+        progress_bar_totals = {
+            "mask": None,
+            "dice": None,
+            "cls": None,
+            "bbox": None,
+            "giou": None,
+        }
 
         for loss_key, loss in losses_all_layers.items():
             log_fn(
@@ -339,16 +346,29 @@ class MaskClassificationLoss(Mask2FormerLoss):
 
             if "loss_mask" in loss_key:
                 weighted_loss = loss * self.mask_coefficient
+                progress_key = "mask"
             elif "loss_dice" in loss_key:
                 weighted_loss = loss * self.dice_coefficient
+                progress_key = "dice"
             elif "loss_cross_entropy" in loss_key:
                 weighted_loss = loss * self.class_coefficient
+                progress_key = "cls"
             elif "loss_bbox" in loss_key:
                 weighted_loss = loss * self.bbox_l1_coefficient
+                progress_key = "bbox"
             elif "loss_giou" in loss_key:
                 weighted_loss = loss * self.bbox_giou_coefficient
+                progress_key = "giou"
             else:
                 raise ValueError(f"Unknown loss key: {loss_key}")
+
+            detached_weighted_loss = weighted_loss.detach()
+            current_total = progress_bar_totals[progress_key]
+            progress_bar_totals[progress_key] = (
+                detached_weighted_loss
+                if current_total is None
+                else current_total + detached_weighted_loss
+            )
 
             total = weighted_loss if total is None else total + weighted_loss
 
@@ -358,7 +378,29 @@ class MaskClassificationLoss(Mask2FormerLoss):
             on_step=True,
             on_epoch=False,
             sync_dist=False,
+        )
+
+        for progress_key, value in progress_bar_totals.items():
+            if value is None:
+                continue
+            log_fn(
+                progress_key,
+                value,
+                on_step=True,
+                on_epoch=False,
+                sync_dist=False,
+                prog_bar=True,
+                logger=False,
+            )
+
+        log_fn(
+            "loss",
+            total.detach(),
+            on_step=True,
+            on_epoch=False,
+            sync_dist=False,
             prog_bar=True,
+            logger=False,
         )
 
         return total

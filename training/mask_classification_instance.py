@@ -69,7 +69,7 @@ class MaskClassificationInstance(LightningModule):
             load_ckpt_class_head=load_ckpt_class_head,
         )
 
-        self.save_hyperparameters(ignore=["_class_path"])
+        self.save_hyperparameters(ignore=["_class_path","network"])
 
         self.mask_thresh = mask_thresh
         self.overlap_thresh = overlap_thresh
