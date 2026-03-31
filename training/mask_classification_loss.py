@@ -9,7 +9,7 @@
 # ---------------------------------------------------------------
 
 
-from typing import List, Optional
+from typing import List, Optional, Tuple
 import torch.distributed as dist
 import torch
 import torch.nn as nn
@@ -26,10 +26,36 @@ from transformers.models.mask2former.modeling_mask2former import (
 )
 
 
+def box_cxcywh_to_xyxy(boxes: torch.Tensor) -> torch.Tensor:
+    """
+    boxes: [..., 4] in normalized cxcywh
+    returns [..., 4] in normalized xyxy
+    """
+    cx, cy, w, h = boxes.unbind(dim=-1)
+    x0 = cx - 0.5 * w
+    y0 = cy - 0.5 * h
+    x1 = cx + 0.5 * w
+    y1 = cy + 0.5 * h
+
+    x_min = torch.minimum(x0, x1)
+    y_min = torch.minimum(y0, y1)
+    x_max = torch.maximum(x0, x1)
+    y_max = torch.maximum(y0, y1)
+
+    return torch.stack([x_min, y_min, x_max, y_max], dim=-1).clamp(0, 1)
+
 class BoxAwareMask2FormerHungarianMatcher(nn.Module):
     """
-    Same idea as HF Mask2FormerHungarianMatcher, but with optional bbox L1 + GIoU
-    costs added to the Hungarian cost matrix.
+    Mask2Former-style Hungarian matcher with optional bbox L1 + GIoU costs.
+
+    Supports:
+      - mask-only matching
+      - box-only matching
+      - hybrid mask+box matching
+
+    Expected box format:
+      - predictions: normalized cxcywh, shape [B, Q, 4]
+      - labels: list of [Ni, 4] normalized cxcywh
     """
 
     def __init__(
@@ -40,98 +66,118 @@ class BoxAwareMask2FormerHungarianMatcher(nn.Module):
         cost_dice: float = 1.0,
         cost_bbox: float = 0.0,
         cost_giou: float = 0.0,
-    ):
+    ) -> None:
         super().__init__()
-        if (
-            cost_mask == 0
-            and cost_dice == 0
-            and cost_class == 0
-            and cost_bbox == 0
-            and cost_giou == 0
-        ):
+        if cost_class == 0 and cost_mask == 0 and cost_dice == 0 and cost_bbox == 0 and cost_giou == 0:
             raise ValueError("All matcher costs cannot be zero.")
 
         self.num_points = num_points
-        self.cost_mask = cost_mask
-        self.cost_dice = cost_dice
-        self.cost_class = cost_class
-        self.cost_bbox = cost_bbox
-        self.cost_giou = cost_giou
+        self.cost_class = float(cost_class)
+        self.cost_mask = float(cost_mask)
+        self.cost_dice = float(cost_dice)
+        self.cost_bbox = float(cost_bbox)
+        self.cost_giou = float(cost_giou)
+
+    def _validate_targets(
+        self,
+        class_labels: List[torch.Tensor],
+        mask_labels: Optional[List[torch.Tensor]],
+        box_labels: Optional[List[torch.Tensor]],
+    ) -> None:
+        if mask_labels is not None and len(mask_labels) != len(class_labels):
+            raise ValueError("mask_labels and class_labels must have the same batch size")
+        if box_labels is not None and len(box_labels) != len(class_labels):
+            raise ValueError("box_labels and class_labels must have the same batch size")
+
+        for batch_idx, labels in enumerate(class_labels):
+            num_targets = labels.shape[0]
+
+            if mask_labels is not None and mask_labels[batch_idx].shape[0] != num_targets:
+                raise ValueError(
+                    f"mask_labels[{batch_idx}] has {mask_labels[batch_idx].shape[0]} instances "
+                    f"but class_labels[{batch_idx}] has {num_targets}"
+                )
+
+            if box_labels is not None and box_labels[batch_idx].shape[0] != num_targets:
+                raise ValueError(
+                    f"box_labels[{batch_idx}] has {box_labels[batch_idx].shape[0]} instances "
+                    f"but class_labels[{batch_idx}] has {num_targets}"
+                )
 
     @torch.no_grad()
     def forward(
         self,
-        masks_queries_logits: torch.Tensor,          # [B, Q, H, W]
-        class_queries_logits: torch.Tensor,          # [B, Q, C+1]
-        mask_labels: List[torch.Tensor],             # list[[Ni, H, W]]
-        class_labels: List[torch.Tensor],            # list[[Ni]]
-        bbox_queries_preds: Optional[torch.Tensor] = None,   # [B, Q, 4], normalized cxcywh
-        box_labels: Optional[List[torch.Tensor]] = None,     # list[[Ni, 4]], normalized cxcywh 0-1
-    ):
-        batch_size = masks_queries_logits.shape[0]
-        device = masks_queries_logits.device
-        indices = []
+        masks_queries_logits: Optional[torch.Tensor],
+        class_queries_logits: torch.Tensor,
+        mask_labels: Optional[List[torch.Tensor]],
+        class_labels: List[torch.Tensor],
+        bbox_queries_preds: Optional[torch.Tensor] = None,
+        box_labels: Optional[List[torch.Tensor]] = None,
+    ) -> List[Tuple[torch.Tensor, torch.Tensor]]:
+        self._validate_targets(class_labels, mask_labels, box_labels)
 
-        use_boxes = (
-            bbox_queries_preds is not None
-            and box_labels is not None
-            and (self.cost_bbox > 0 or self.cost_giou > 0)
-        )
+        use_masks = (self.cost_mask > 0 or self.cost_dice > 0)
+        use_boxes = (self.cost_bbox > 0 or self.cost_giou > 0)
+
+        if use_masks and (masks_queries_logits is None or mask_labels is None):
+            raise ValueError("Mask costs are enabled, but masks_queries_logits or mask_labels is missing.")
+        if use_boxes and (bbox_queries_preds is None or box_labels is None):
+            raise ValueError("Box costs are enabled, but bbox_queries_preds or box_labels is missing.")
+
+        batch_size = class_queries_logits.shape[0]
+        device = class_queries_logits.device
+        indices: List[Tuple[torch.Tensor, torch.Tensor]] = []
 
         for i in range(batch_size):
-            num_targets = len(class_labels[i])
+            target_classes = class_labels[i].to(device=device, dtype=torch.long)
+            num_targets = target_classes.numel()
 
             if num_targets == 0:
                 empty = torch.empty(0, dtype=torch.int64, device=device)
                 indices.append((empty, empty))
                 continue
 
-            pred_probs = class_queries_logits[i].softmax(-1)   # [Q, C+1]
-            pred_mask = masks_queries_logits[i]                # [Q, H, W]
-            tgt_mask = mask_labels[i].to(pred_mask)            # [N, H, W]
+            pred_probs = class_queries_logits[i].softmax(-1)  # [Q, C+1]
+            cost_matrix = self.cost_class * (-pred_probs[:, target_classes])  # [Q, N]
 
-            # classification cost: [Q, N]
-            cost_class = -pred_probs[:, class_labels[i]]
+            if use_masks:
+                pred_mask = masks_queries_logits[i][:, None]  # [Q, 1, H, W]
+                tgt_mask = mask_labels[i].to(device=pred_mask.device, dtype=pred_mask.dtype)[:, None]  # [N, 1, H, W]
 
-            # mask costs on shared sampled points, same idea as HF matcher
-            pred_mask = pred_mask[:, None]   # [Q, 1, H, W]
-            tgt_mask = tgt_mask[:, None]     # [N, 1, H, W]
+                point_coords = torch.rand(1, self.num_points, 2, device=device)
 
-            point_coords = torch.rand(1, self.num_points, 2, device=device)
-            pred_coords = point_coords.repeat(pred_mask.shape[0], 1, 1)
-            tgt_coords = point_coords.repeat(tgt_mask.shape[0], 1, 1)
+                pred_points = sample_point(
+                    pred_mask,
+                    point_coords.repeat(pred_mask.shape[0], 1, 1),
+                    align_corners=False,
+                ).squeeze(1)  # [Q, P]
 
-            pred_points = sample_point(pred_mask, pred_coords, align_corners=False).squeeze(1)  # [Q, P]
-            tgt_points = sample_point(tgt_mask, tgt_coords, align_corners=False).squeeze(1)      # [N, P]
+                tgt_points = sample_point(
+                    tgt_mask,
+                    point_coords.repeat(tgt_mask.shape[0], 1, 1),
+                    align_corners=False,
+                ).squeeze(1)  # [N, P]
 
-            cost_mask = pair_wise_sigmoid_cross_entropy_loss(pred_points, tgt_points)  # [Q, N]
-            cost_dice = pair_wise_dice_loss(pred_points, tgt_points)                   # [Q, N]
+                if self.cost_mask > 0:
+                    cost_matrix = cost_matrix + self.cost_mask * pair_wise_sigmoid_cross_entropy_loss(
+                        pred_points, tgt_points
+                    )
 
-            cost_matrix = (
-                self.cost_class * cost_class
-                + self.cost_mask * cost_mask
-                + self.cost_dice * cost_dice
-            )
+                if self.cost_dice > 0:
+                    cost_matrix = cost_matrix + self.cost_dice * pair_wise_dice_loss(pred_points, tgt_points)
 
             if use_boxes:
-                pred_boxes = bbox_queries_preds[i]     # [Q, 4], normalized cxcywh
-                tgt_boxes = box_labels[i].to(pred_boxes)
+                pred_boxes = bbox_queries_preds[i]  # [Q, 4]
+                tgt_boxes = box_labels[i].to(device=pred_boxes.device, dtype=pred_boxes.dtype)  # [N, 4]
 
-                # L1 cost in cxcywh space
-                cost_bbox = torch.cdist(pred_boxes, tgt_boxes, p=1)  # [Q, N]
+                if self.cost_bbox > 0:
+                    cost_matrix = cost_matrix + self.cost_bbox * torch.cdist(pred_boxes, tgt_boxes, p=1)
 
-                # GIoU cost in xyxy space
-                pred_xyxy = box_convert(pred_boxes, "cxcywh", "xyxy").clamp(0, 1)
-                tgt_xyxy = box_convert(tgt_boxes, "cxcywh", "xyxy").clamp(0, 1)
-                cost_giou = -generalized_box_iou(pred_xyxy, tgt_xyxy)  # [Q, N]
+                if self.cost_giou > 0:
+                    pred_xyxy = box_cxcywh_to_xyxy(pred_boxes)
+                    tgt_xyxy = box_cxcywh_to_xyxy(tgt_boxes)
+                    cost_matrix = cost_matrix + self.cost_giou * (-generalized_box_iou(pred_xyxy, tgt_xyxy))
 
-                cost_matrix = (
-                    cost_matrix
-                    + self.cost_bbox * cost_bbox
-                    + self.cost_giou * cost_giou
-                )
-
-            # same practical stabilizers HF uses for infeasible cost matrices
             cost_matrix = torch.nan_to_num(cost_matrix, nan=0.0, posinf=1e10, neginf=-1e10)
             cost_matrix = cost_matrix.clamp(min=-1e10, max=1e10)
 
@@ -144,7 +190,6 @@ class BoxAwareMask2FormerHungarianMatcher(nn.Module):
             )
 
         return indices
-
 
 class MaskClassificationLoss(Mask2FormerLoss):
     def __init__(
