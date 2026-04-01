@@ -117,7 +117,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--check-val-every-n-epoch", type=int, default=2)
     parser.add_argument("--accelerator", default="auto")
     parser.add_argument("--devices", default="1")
-    parser.add_argument("--precision", default=None)
+    parser.add_argument("--precision", default="bf16-true")
     parser.add_argument("--log-dir", type=Path, default=REPO_ROOT / "logs")
     parser.add_argument(
         "--experiment-name",
