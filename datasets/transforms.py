@@ -1,17 +1,11 @@
-# ---------------------------------------------------------------
-# © 2025 Mobile Perception Systems Lab at TU/e. All rights reserved.
-# Licensed under the MIT License.
-#
-# Portions of this file are adapted from Detectron2 by Facebook, Inc. and its affiliates,
-# used under the Apache 2.0 License.
-# ---------------------------------------------------------------
+from __future__ import annotations
+
+from typing import Any
 
 import torch
+from torch import Tensor, nn
 from torchvision.transforms import v2 as T
-from torchvision.transforms.v2 import functional as F
-from torchvision.tv_tensors import wrap, TVTensor
-from torch import nn, Tensor
-from typing import Any, Union
+from torchvision.tv_tensors import TVTensor, wrap
 
 
 class Transforms(nn.Module):
@@ -24,100 +18,191 @@ class Transforms(nn.Module):
         max_contrast_factor: float = 0.5,
         saturation_factor: float = 0.5,
         max_hue_delta: int = 18,
-    ):
+        zoom_out_p: float = 0.3,
+        zoom_out_range: tuple[float, float] = (1.0, 1.5),
+        iou_crop_enabled: bool = True,
+        blur_p: float = 0.10,
+        grayscale_p: float = 0.05,
+        small_affine_p: float = 0.15,
+        affine_translate: tuple[float, float] = (0.05, 0.05),
+        affine_scale: tuple[float, float] = (0.9, 1.1),
+        max_retries: int = 10,
+        fill: int | float = 0,
+    ) -> None:
         super().__init__()
 
         self.img_size = img_size
-        self.color_jitter_enabled = color_jitter_enabled
-        self.max_brightness_factor = max_brightness_delta / 255.0
-        self.max_contrast_factor = max_contrast_factor
-        self.max_saturation_factor = saturation_factor
-        self.max_hue_delta = max_hue_delta / 360.0
+        self.max_retries = max_retries
 
-        self.random_horizontal_flip = T.RandomHorizontalFlip()
-        self.scale_jitter = T.ScaleJitter(target_size=img_size, scale_range=scale_range)
-        self.random_crop = T.RandomCrop(img_size)
+        common_ops: list[nn.Module] = []
 
-    def _random_factor(self, factor: float, center: float = 1.0):
-        return torch.empty(1).uniform_(center - factor, center + factor).item()
-
-    def _brightness(self, img):
-        if torch.rand(()) < 0.5:
-            img = F.adjust_brightness(
-                img, self._random_factor(self.max_brightness_factor)
+        if color_jitter_enabled:
+            common_ops.append(
+                T.RandomPhotometricDistort(
+                    brightness=(
+                        1.0 - max_brightness_delta / 255.0,
+                        1.0 + max_brightness_delta / 255.0,
+                    ),
+                    contrast=(
+                        1.0 - max_contrast_factor,
+                        1.0 + max_contrast_factor,
+                    ),
+                    saturation=(
+                        1.0 - saturation_factor,
+                        1.0 + saturation_factor,
+                    ),
+                    hue=(
+                        -max_hue_delta / 360.0,
+                        max_hue_delta / 360.0,
+                    ),
+                    p=0.5,
+                )
             )
 
-        return img
-
-    def _contrast(self, img):
-        if torch.rand(()) < 0.5:
-            img = F.adjust_contrast(img, self._random_factor(self.max_contrast_factor))
-
-        return img
-
-    def _saturation_and_hue(self, img):
-        if torch.rand(()) < 0.5:
-            img = F.adjust_saturation(
-                img, self._random_factor(self.max_saturation_factor)
+        if blur_p > 0:
+            common_ops.append(
+                T.RandomApply(
+                    [T.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0))],
+                    p=blur_p,
+                )
             )
 
-        if torch.rand(()) < 0.5:
-            img = F.adjust_hue(img, self._random_factor(self.max_hue_delta, center=0.0))
+        if grayscale_p > 0:
+            common_ops.append(T.RandomGrayscale(p=grayscale_p))
 
-        return img
+        self.common = T.Compose(common_ops)
 
-    def color_jitter(self, img):
-        if not self.color_jitter_enabled:
-            return img
+        tail_ops: list[nn.Module] = []
 
-        img = self._brightness(img)
+        if small_affine_p > 0:
+            tail_ops.append(
+                T.RandomApply(
+                    [
+                        T.RandomAffine(
+                            degrees=0.0,
+                            translate=affine_translate,
+                            scale=affine_scale,
+                            fill=fill,
+                        )
+                    ],
+                    p=small_affine_p,
+                )
+            )
 
-        if torch.rand(()) < 0.5:
-            img = self._contrast(img)
-            img = self._saturation_and_hue(img)
-        else:
-            img = self._saturation_and_hue(img)
-            img = self._contrast(img)
+        tail_ops.extend(
+            [
+                T.RandomHorizontalFlip(p=0.5),
+                T.ScaleJitter(target_size=img_size, scale_range=scale_range),
+                T.RandomCrop(size=img_size, pad_if_needed=True, fill=fill),
+            ]
+        )
 
-        return img
+        with_boxes_ops: list[nn.Module] = [
+            T.RandomZoomOut(fill=fill, side_range=zoom_out_range, p=zoom_out_p),
+        ]
+        if iou_crop_enabled:
+            with_boxes_ops.append(
+                T.RandomIoUCrop(
+                    min_scale=0.3,
+                    max_scale=1.0,
+                    min_aspect_ratio=0.5,
+                    max_aspect_ratio=2.0,
+                    trials=40,
+                )
+            )
+        with_boxes_ops.extend(tail_ops)
 
-    def pad(
-        self, img: Tensor, target: dict[str, Any]
-    ) -> tuple[Tensor, dict[str, Union[Tensor, TVTensor]]]:
-        pad_h = max(0, self.img_size[-2] - img.shape[-2])
-        pad_w = max(0, self.img_size[-1] - img.shape[-1])
-        padding = [0, 0, pad_w, pad_h]
+        no_boxes_ops: list[nn.Module] = [
+            T.RandomZoomOut(fill=fill, side_range=zoom_out_range, p=zoom_out_p),
+            *tail_ops,
+        ]
 
-        img = F.pad(img, padding)
-        target["masks"] = F.pad(target["masks"], padding)
-        if "boxes" in target:
-            target["boxes"] = F.pad(target["boxes"], padding)
+        self.with_boxes = T.Compose(with_boxes_ops)
+        self.no_boxes = T.Compose(no_boxes_ops)
 
-        return img, target
+        self.clamp_boxes = T.ClampBoundingBoxes()
+        self.sanitize_boxes = T.SanitizeBoundingBoxes(
+            labels_getter=self._labels_getter
+        )
 
-    def _filter(self, target: dict[str, Union[Tensor, TVTensor]], keep: Tensor) -> dict:
-        return {k: wrap(v[keep], like=v) for k, v in target.items()}
+    def _labels_getter(self, inputs: Any):
+        _, target = inputs
+
+        aligned = []
+        for key in ("labels", "area", "iscrowd", "is_crowd"):
+            value = target.get(key)
+            if torch.is_tensor(value) and value.ndim > 0:
+                aligned.append(value)
+
+        return aligned
+
+    def _num_instances(self, target: dict[str, Any]) -> int:
+        for key in ("boxes", "masks", "labels", "iscrowd", "is_crowd", "area"):
+            value = target.get(key)
+            if torch.is_tensor(value) and value.ndim > 0:
+                return int(value.shape[0])
+        return 0
+
+    def _filter_instances(
+        self,
+        target: dict[str, Any],
+        keep: Tensor,
+    ) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+
+        for key, value in target.items():
+            if torch.is_tensor(value) and value.ndim > 0 and value.shape[0] == keep.numel():
+                sliced = value[keep]
+                out[key] = wrap(sliced, like=value) if isinstance(value, TVTensor) else sliced
+            else:
+                out[key] = value
+
+        return out
+
+    def _drop_crowd(self, target: dict[str, Any]) -> dict[str, Any]:
+        crowd_key = "iscrowd" if "iscrowd" in target else "is_crowd" if "is_crowd" in target else None
+        if crowd_key is None:
+            return target
+
+        keep = ~target[crowd_key].to(torch.bool)
+        return self._filter_instances(target, keep)
+
+    def _has_nonempty_boxes(self, target: dict[str, Any]) -> bool:
+        boxes = target.get("boxes")
+        return torch.is_tensor(boxes) and boxes.ndim > 0 and boxes.shape[0] > 0
+
+    def _has_instances(self, target: dict[str, Any]) -> bool:
+        if "boxes" in target and torch.is_tensor(target["boxes"]):
+            return target["boxes"].shape[0] > 0
+
+        if "masks" in target and torch.is_tensor(target["masks"]):
+            return target["masks"].shape[0] > 0
+
+        return self._num_instances(target) > 0
 
     def forward(
-        self, img: Tensor, target: dict[str, Union[Tensor, TVTensor]]
-    ) -> tuple[Tensor, dict[str, Union[Tensor, TVTensor]]]:
-        img_orig, target_orig = img, target
+        self,
+        img: Tensor,
+        target: dict[str, Any],
+    ) -> tuple[Tensor, dict[str, Any]]:
+        target = self._drop_crowd(target.copy())
+        target_was_empty = not self._has_instances(target)
 
-        target = self._filter(target, ~target["is_crowd"])
-        target_was_empty = target["masks"].shape[0] == 0
+        last_img, last_target = img, target
 
-        img = self.color_jitter(img)
-        img, target = self.random_horizontal_flip(img, target)
-        img, target = self.scale_jitter(img, target)
-        img, target = self.pad(img, target)
-        img, target = self.random_crop(img, target)
+        for _ in range(self.max_retries):
+            out_img, out_target = self.common(img, target)
 
-        valid = target["masks"].flatten(1).any(1)
-        if not valid.any():
-            if target_was_empty:
-                return img, target
-            return self(img_orig, target_orig)
+            aug = self.with_boxes if self._has_nonempty_boxes(out_target) else self.no_boxes
+            out_img, out_target = aug(out_img, out_target)
 
-        target = self._filter(target, valid)
+            if "boxes" in out_target:
+                out_img, out_target = self.clamp_boxes(out_img, out_target)
+                out_img, out_target = self.sanitize_boxes(out_img, out_target)
 
-        return img, target
+            last_img, last_target = out_img, out_target
+
+            if target_was_empty or self._has_instances(out_target):
+                return out_img, out_target
+
+        return last_img, last_target

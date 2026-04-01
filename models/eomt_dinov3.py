@@ -7,6 +7,7 @@
 # ---------------------------------------------------------------
 
 from pathlib import Path
+import random
 from typing import List, Optional, Tuple
 import torch
 import torch.nn as nn
@@ -74,6 +75,18 @@ def token2map(x:torch.Tensor,grid_size):
     B,N,D = x.shape
     return x.transpose(1, 2).reshape(B,D,grid_size[0],grid_size[1])
 
+class RandomResizeToMultipleOf16:
+    def __init__(self, scale=(0.5, 1.0), min_size=16):
+        self.scale = scale
+        self.min_size = min_size
+    def __call__(self, img):
+        # img: [..., H, W]
+        h, w = img.shape[-2], img.shape[-1]
+        s = random.uniform(*self.scale)
+        new_h = max(self.min_size, round(h * s / 16) * 16)
+        new_w = max(self.min_size, round(w * s / 16) * 16)
+        return F.resize(img, [new_h, new_w])
+    
 class EoMT(nn.Module):
     class Index:
         def __init__(self,num_q,num_backbone_prefix_tokens):
@@ -114,6 +127,7 @@ class EoMT(nn.Module):
         self.masked_attn_enabled = masked_attn_enabled
         self.bbox_head_enabled = bbox_head_enabled
         D = self.encoder.embed_dim
+        self.num_classes = num_classes
         self.fsrcnnx2 = None
         if fsrcnnx2:
             self.fsrcnnx2 = build_or_load_fsrcnn_x2(
@@ -124,21 +138,19 @@ class EoMT(nn.Module):
         self.register_buffer("attn_mask_probs", torch.ones(num_blocks))
 
         self.q = nn.Embedding(num_q, D)
-        self.class_head = nn.Linear(D, num_classes + 1)
 
-        self.mask_head = nn.Sequential(
-            nn.Linear(D, D), nn.GELU(),
-            nn.Linear(D, D), nn.GELU(),
-            nn.Linear(D, D),
-        )
+        # class head 
+        DD = num_classes + 1
+        # mask head 
+        DD += D
         if self.bbox_head_enabled:
-            self.bbox_head = nn.Sequential(
-                nn.Linear(D, D), nn.GELU(),
-                nn.Linear(D, D), nn.GELU(),
-                nn.Linear(D, 4),
-            )
-        else:
-            self.bbox_head = None
+        # bbox head 
+            DD += 4
+        self.output_head = nn.Sequential(
+            nn.Linear(D, DD),  nn.GELU(),
+            nn.Linear(DD, DD), nn.GELU(),
+            nn.Linear(DD, DD),
+        )
 
         patch_size = self.encoder.patch_size
         max_patch_size = patch_size
@@ -234,15 +246,20 @@ class EoMT(nn.Module):
     
     def _predict(
         self,
-        query_tokens: torch.Tensor,
-        patch_tokens_map: torch.Tensor,
-        patch_tokens_map_x2: Optional[torch.Tensor] = None,
+        query_tokens: torch.Tensor, # (B,num_q,D)
+        patch_tokens_map: torch.Tensor, # (B,D,Hp,Wp)
+        patch_tokens_map_x2: Optional[torch.Tensor] = None, # (B,D, Hp*n, Wp*n)
     ):
-        class_logits = self.class_head(query_tokens)
+        output_logits = self.output_head(query_tokens) # (B,num_q,DD)
 
-        bbox_preds = None
-        if self.bbox_head is not None:
-            bbox_preds = self.bbox_head(query_tokens).sigmoid() # normalized cxcywh in [0,1].
+        cls_num = self.num_classes + 1
+        class_logits = output_logits[:, :, : cls_num]
+        query_mask_feats = output_logits[:, :, cls_num : (cls_num + self.encoder.embed_dim)]
+        
+        
+        if self.bbox_head_enabled:
+            bbox_logits = output_logits[:, :, -4 :]
+            bbox_preds = bbox_logits.sigmoid() # normalized cxcywh in [0,1].
         
         if patch_tokens_map_x2 is None:
             if self.upscale is not None:
@@ -250,7 +267,6 @@ class EoMT(nn.Module):
             else:
                 patch_tokens_map_x2 = patch_tokens_map            
 
-        query_mask_feats = self.mask_head(query_tokens)
         mask_logits = torch.einsum("bqc,bchw->bqhw", query_mask_feats, patch_tokens_map_x2)
 
         return mask_logits, class_logits, bbox_preds
@@ -353,7 +369,11 @@ class EoMT(nn.Module):
     ):
         # all input x must be 0-1, uint8/255.0
         if self.fsrcnnx2:
-            x2 = self.fsrcnnx2(x)
+            x2 = self.fsrcnnx2(x).detach()
+
+        if self.training and x2 is not None:
+            x2 = RandomResizeToMultipleOf16(scale=(0.7, 1.3))(x2)
+
         x = self._normalize_image(x)
         x2 = self._normalize_image(x2)
 
