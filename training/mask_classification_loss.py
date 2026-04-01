@@ -171,7 +171,7 @@ class BoxAwareMask2FormerHungarianMatcher(nn.Module):
                 tgt_boxes = box_labels[i].to(device=pred_boxes.device, dtype=pred_boxes.dtype)  # [N, 4]
 
                 if self.cost_bbox > 0:
-                    cost_matrix = cost_matrix + self.cost_bbox * torch.cdist(pred_boxes, tgt_boxes, p=1)
+                    cost_matrix = cost_matrix + self.cost_bbox * torch.cdist(pred_boxes.float(), tgt_boxes.float(), p=1)
 
                 if self.cost_giou > 0:
                     pred_xyxy = box_cxcywh_to_xyxy(pred_boxes)
