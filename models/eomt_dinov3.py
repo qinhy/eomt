@@ -375,7 +375,7 @@ class EoMT(nn.Module):
 
         if self.training and x2 is not None:
             x2 = RandomResizeToMultipleOf16(
-                scale=(0.7, 1.3),patch_size=self.patch_size)(x2)
+                scale=(0.7, 1.3),patch_size=self.patch_size)(x2).detach()
 
         x = self._normalize_image(x)
         x2 = self._normalize_image(x2)
