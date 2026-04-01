@@ -18,7 +18,7 @@ import torchvision
 
 from dinov3.layers.block import SelfAttentionBlock
 from dinov3.models.vision_transformer import DinoVisionTransformer, vit_small
-from models.scale_block import ScaleBlock, build_or_load_fsrcnn_x2
+from models.scale_block import FSRCNNx2YOnlyRGBWrapper, ScaleBlock, build_or_load_fsrcnn_x2
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FSRCNN_X2_WEIGHTS = REPO_ROOT / "data" / "fsrcnn_x2.pth"
@@ -118,11 +118,20 @@ class EoMT(nn.Module):
         fsrcnnx2=False,
         encoder_repo='../dinov3',
         encoder_model='dinov3_vitl16',
+        precision="bf16-true",
     ):
         super().__init__()
+        if "bf16" in precision:
+            self.dtype = dtype = torch.bfloat16
+        elif "fp16" in precision:
+            self.dtype = dtype = torch.float16
+        else:
+            self.dtype = dtype = torch.float32
+
         # print(f"load model of {encoder_model},{encoder_weights}")
         self.encoder: DinoVisionTransformer = torch.hub.load(encoder_repo, encoder_model,
-                                                             source='local',weights=encoder_weights)
+                                                             source='local',weights=encoder_weights).to(dtype=dtype)
+
         self.patch_size = self.encoder.patch_size
         self.num_q = num_q
         self.num_blocks = num_blocks
@@ -132,14 +141,14 @@ class EoMT(nn.Module):
         self.num_classes = num_classes
         self.fsrcnnx2 = None
         if fsrcnnx2:
-            self.fsrcnnx2 = build_or_load_fsrcnn_x2(
+            self.fsrcnnx2:FSRCNNx2YOnlyRGBWrapper = build_or_load_fsrcnn_x2(
                 checkpoint_path=str(FSRCNN_X2_WEIGHTS)
-            )
+            ).to(dtype=dtype)
             freeze_module_as_buffers(self.fsrcnnx2)
 
-        self.register_buffer("attn_mask_probs", torch.ones(num_blocks))
+        self.register_buffer("attn_mask_probs", torch.ones(num_blocks).to(dtype=dtype))
 
-        self.q = nn.Embedding(num_q, D)
+        self.q = nn.Embedding(num_q, D).to(dtype=dtype)
 
         # class head 
         DD = num_classes + 1
@@ -152,21 +161,21 @@ class EoMT(nn.Module):
             nn.Linear(D, DD),  nn.GELU(),
             nn.Linear(DD, DD), nn.GELU(),
             nn.Linear(DD, DD),
-        )
+        ).to(dtype=dtype)
 
         patch_size = self.encoder.patch_size
         max_patch_size = patch_size
         num_upscale = max(1, int(math.log2(max_patch_size)) - 2)
         if upscale:
-            self.upscale = nn.Sequential(*[ScaleBlock(D) for _ in range(num_upscale)])
+            self.upscale = nn.Sequential(*[ScaleBlock(D) for _ in range(num_upscale)]).to(dtype=dtype)
         else:
             self.upscale = None
 
         self.num_backbone_prefix_tokens = self.encoder.n_storage_tokens+1        
         self.idx = self.Index(num_q,self.num_backbone_prefix_tokens)
 
-        pixel_mean = torch.tensor([0.485, 0.456, 0.406]).reshape(1, -1, 1, 1)
-        pixel_std = torch.tensor([0.229, 0.224, 0.225]).reshape(1, -1, 1, 1)
+        pixel_mean = torch.tensor([0.485, 0.456, 0.406]).reshape(1, -1, 1, 1).to(dtype=dtype)
+        pixel_std = torch.tensor([0.229, 0.224, 0.225]).reshape(1, -1, 1, 1).to(dtype=dtype)
 
         self.register_buffer("pixel_mean", pixel_mean)
         self.register_buffer("pixel_std", pixel_std)
@@ -396,12 +405,13 @@ class EoMT(nn.Module):
 #                 #  encoder_model='dinov3_vitl16',
 #                 #  encoder_weights='../BitNetCNN/data/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth'
 #                  encoder_model='dinov3_vits16',
-#                  encoder_weights='../BitNetCNN/data/dinov3_vits16_pretrain_lvd1689m-08c60483.pth'
+#                  encoder_weights='../BitNetCNN/data/dinov3_vits16_pretrain_lvd1689m-08c60483.pth',
 #                 #  encoder=torch.hub.load('../dinov3', 'dinov3_vitl16', source='local',
 #                 #                     weights='../BitNetCNN/data/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth')                
 #                 #  encoder=torch.hub.load('../dinov3', 'dinov3_vits16', source='local',
 #                 #                     weights='../BitNetCNN/data/dinov3_vits16_pretrain_lvd1689m-08c60483.pth')
+#                 precision="bf16-true"
 #             ).cuda()
-#     img = torch.randn(1, 3, 320, 320).cuda()
+#     img = torch.randn(1, 3, 320, 320).cuda().to(dtype=model.dtype)
 #     res = model(img)
 #     print(res)

@@ -102,8 +102,8 @@ class MaskClassificationInstance(LightningModule):
         return dict(
             masks=torch.zeros((0, *img_size), dtype=torch.bool, device=device),
             labels=torch.zeros((0,), dtype=torch.long, device=device),
-            scores=torch.zeros((0,), dtype=torch.float32, device=device),
-            boxes=torch.zeros((0, 4), dtype=torch.float32, device=device),
+            scores=torch.zeros((0,), device=device),
+            boxes=torch.zeros((0, 4), device=device),
         )
 
     def _predict_instances_for_visualization(
@@ -164,9 +164,9 @@ class MaskClassificationInstance(LightningModule):
             )
             boxes = boxes * scale
         elif len(masks) > 0:
-            boxes = masks_to_boxes(masks.float())
+            boxes = masks_to_boxes(masks)
         else:
-            boxes = torch.zeros((0, 4), device=img.device, dtype=torch.float32)
+            boxes = torch.zeros((0, 4), device=img.device)
 
         return dict(
             masks=masks,
@@ -184,7 +184,7 @@ class MaskClassificationInstance(LightningModule):
         pred = self._predict_instances_for_visualization(img)
         target_boxes = target.get("boxes")
         if target_boxes is None:
-            target_boxes = masks_to_boxes(target["masks"].float())
+            target_boxes = masks_to_boxes(target["masks"])
 
         gt_vis = COCOInstance.draw_one(
             img,
@@ -268,7 +268,7 @@ class MaskClassificationInstance(LightningModule):
                     )
                     boxes = boxes * scale
                 else:
-                    boxes = masks_to_boxes(masks.float())
+                    boxes = masks_to_boxes(masks)
 
                 preds.append(
                     dict(
@@ -279,11 +279,9 @@ class MaskClassificationInstance(LightningModule):
                     )
                 )
                 if "boxes" in targets[j]:
-                    target_boxes = targets[j]["boxes"].to(
-                        device=self.device, dtype=torch.float32
-                    )
+                    target_boxes = targets[j]["boxes"].to(device=self.device)
                 else:
-                    target_boxes = masks_to_boxes(targets[j]["masks"].float())
+                    target_boxes = masks_to_boxes(targets[j]["masks"])
                 targets_.append(
                     dict(
                         masks=targets[j]["masks"],
@@ -356,7 +354,7 @@ class MaskClassificationInstance(LightningModule):
                     )
                     boxes = boxes * scale
                 else:
-                    boxes = masks_to_boxes(masks.float())
+                    boxes = masks_to_boxes(masks)
 
                 preds = [
                     dict(
@@ -368,12 +366,9 @@ class MaskClassificationInstance(LightningModule):
                 ]
 
                 if "boxes" in target:
-                    target_boxes = target["boxes"].to(
-                        device=self.device,
-                        dtype=torch.float32,
-                    )
+                    target_boxes = target["boxes"].to(device=self.device)
                 else:
-                    target_boxes = masks_to_boxes(target["masks"].float())
+                    target_boxes = masks_to_boxes(target["masks"])
 
                 targets_ = [
                     dict(

@@ -263,6 +263,7 @@ def build_model(args: argparse.Namespace) -> MaskClassificationInstance:
         encoder_repo=str(args.encoder_repo),
         encoder_model=args.encoder_model,
         fsrcnnx2=True,
+        precision=args.precision,
     )
     return MaskClassificationInstance(
         network=network,
@@ -378,9 +379,10 @@ if __name__ == "__main__":
                     encoder_repo='../dinov3',
                     encoder_model='dinov3_vits16',
                     encoder_weights='../BitNetCNN/data/dinov3_vits16_pretrain_lvd1689m-08c60483.pth',
-                    fsrcnnx2=True
+                    fsrcnnx2=True,
+                    precision="bf16-true",                    
             ).cuda()
-    with torch.inference_mode(), torch.autocast("cuda", dtype=torch.float16):
+    with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
         img = torch.randn(1, 3, 1280, 1280).cuda()
         res = model.forward(img)
     print(res)

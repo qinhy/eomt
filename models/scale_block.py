@@ -153,7 +153,7 @@ class FSRCNNx2YOnlyRGBWrapper(nn.Module):
         if x.ndim != 4 or x.shape[1] != 3:
             raise ValueError(f"Expected [N, 3, H, W], got {tuple(x.shape)}")
 
-        x = x.float().clamp(0.0, 1.0)
+        x = x.clamp(0.0, 1.0)
 
         ycbcr = self._rgb_to_ycbcr(x)
         y = ycbcr[:, 0:1] / 255.0       # model expects Y in [0, 1]
