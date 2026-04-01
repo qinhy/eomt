@@ -365,7 +365,7 @@ class COCOInstance(LightningDataModule):
 
         def to_bool_mask(mask):
             if isinstance(mask, torch.Tensor):
-                mask = mask.detach().cpu().numpy()
+                mask = mask.detach().float().cpu().numpy()
             else:
                 mask = np.asarray(mask)
 
@@ -378,9 +378,9 @@ class COCOInstance(LightningDataModule):
 
         def to_boxes_numpy(x):
             if isinstance(x, torch.Tensor):
-                return x.detach().cpu().numpy()
+                return x.detach().float().cpu().numpy()
             if hasattr(x, "as_subclass"):  # tv_tensors
-                return torch.as_tensor(x).detach().cpu().numpy()
+                return torch.as_tensor(x).detach().float().cpu().numpy()
             return np.asarray(x)
 
         def color_for_label(label: int):
