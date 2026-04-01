@@ -14,6 +14,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 
+import torchvision
+
 from dinov3.layers.block import SelfAttentionBlock
 from dinov3.models.vision_transformer import DinoVisionTransformer, vit_small
 from models.scale_block import ScaleBlock, build_or_load_fsrcnn_x2
@@ -76,16 +78,16 @@ def token2map(x:torch.Tensor,grid_size):
     return x.transpose(1, 2).reshape(B,D,grid_size[0],grid_size[1])
 
 class RandomResizeToMultipleOf16:
-    def __init__(self, scale=(0.5, 1.0), min_size=16):
+    def __init__(self, scale=(0.5, 1.0), patch_size=16):
         self.scale = scale
-        self.min_size = min_size
+        self.patch_size = patch_size
     def __call__(self, img):
         # img: [..., H, W]
         h, w = img.shape[-2], img.shape[-1]
         s = random.uniform(*self.scale)
-        new_h = max(self.min_size, round(h * s / 16) * 16)
-        new_w = max(self.min_size, round(w * s / 16) * 16)
-        return F.resize(img, [new_h, new_w])
+        new_h = max(self.patch_size, round(h * s / self.patch_size) * self.patch_size)
+        new_w = max(self.patch_size, round(w * s / self.patch_size) * self.patch_size)
+        return torchvision.transforms.functional.resize(img, [new_h, new_w])
     
 class EoMT(nn.Module):
     class Index:
@@ -372,7 +374,8 @@ class EoMT(nn.Module):
             x2 = self.fsrcnnx2(x).detach()
 
         if self.training and x2 is not None:
-            x2 = RandomResizeToMultipleOf16(scale=(0.7, 1.3))(x2)
+            x2 = RandomResizeToMultipleOf16(
+                scale=(0.7, 1.3),patch_size=self.patch_size)(x2)
 
         x = self._normalize_image(x)
         x2 = self._normalize_image(x2)
