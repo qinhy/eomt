@@ -140,10 +140,10 @@ def scaled_dot_product_attention(
         scale: float | None = None,
         enable_gqa: bool = False,
     ) -> Tensor:
-    with sdpa_kernel(
-        [SDPBackend.CUDNN_ATTENTION, SDPBackend.FLASH_ATTENTION, SDPBackend.MATH],
-        set_priority=True
-    ):
+    with sdpa_kernel(SDPBackend.CUDNN_ATTENTION):
+    #     [SDPBackend.CUDNN_ATTENTION, SDPBackend.FLASH_ATTENTION, SDPBackend.MATH],
+    #     set_priority=True
+    # ):
         return torch.nn.functional.scaled_dot_product_attention(
             query,
             key,
