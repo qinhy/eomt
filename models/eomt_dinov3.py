@@ -378,6 +378,8 @@ class EoMT(nn.Module):
         x: torch.Tensor,
         x2: Optional[torch.Tensor] = None,
     ):
+        x = x.to(dtype=self.dtype)
+
         # all input x must be 0-1, uint8/255.0
         if self.fsrcnnx2:
             x2 = self.fsrcnnx2(x).detach()
@@ -385,7 +387,10 @@ class EoMT(nn.Module):
         if self.training and x2 is not None:
             x2 = RandomResizeToMultipleOf16(
                 scale=(0.7, 1.3),patch_size=self.patch_size)(x2).detach()
-
+            
+        if x2 is not None:
+            x2 = x2.to(dtype=self.dtype)
+            
         x = self._normalize_image(x)
         x2 = self._normalize_image(x2)
 
