@@ -108,8 +108,9 @@ class MaskClassificationInstance(LightningModule):
 
     def _predict_instances_for_visualization(
         self,
-        img: torch.Tensor,
+        img: torch.Tensor, # (C,H,W) uint8
         top_k: int = 10,
+        ingore_no_objets=False,
     ):
         img_size = img.shape[-2:]
         mask_logits_per_layer, class_logits_per_layer, bbox_preds_per_layer = self(
@@ -117,15 +118,24 @@ class MaskClassificationInstance(LightningModule):
         )
 
         mask_logits = F.interpolate(
-            mask_logits_per_layer[-1],
+            mask_logits_per_layer[-1], # (B,N,Hp,Wp)
             size=img_size,
             mode="bilinear",
             align_corners=False,
         )
-        class_logits = class_logits_per_layer[-1]
-        bbox_preds = bbox_preds_per_layer[-1]
+        mask_logits = mask_logits[0]  # (N,Hp,Wp)
+        class_logits = class_logits_per_layer[-1][0]  # (num_q, cls+1)
+        bbox_preds = bbox_preds_per_layer[-1][0]  # (num_q, 4)
 
-        scores = class_logits[0].softmax(dim=-1)[:, :-1]
+        scores = class_logits.softmax(dim=-1)
+        
+        if not ingore_no_objets:
+            is_ground = scores.argmax(dim=-1) == (class_logits.shape[-1] - 1)
+        
+        scores = scores[:, :-1]
+        if not ingore_no_objets:
+            mask_logits,scores,bbox_preds = mask_logits[~is_ground],scores[~is_ground],bbox_preds[~is_ground]
+
         top_k = min(top_k, self.eval_top_k_instances, scores.numel())
         if top_k == 0:
             return self._empty_prediction(img_size, img.device)
@@ -141,7 +151,7 @@ class MaskClassificationInstance(LightningModule):
         labels = labels[topk_indices]
 
         query_indices = topk_indices // scores.shape[-1]
-        mask_logits_img = mask_logits[0][query_indices]
+        mask_logits_img = mask_logits[query_indices]
 
         masks = mask_logits_img > 0
         mask_scores = (
@@ -155,7 +165,7 @@ class MaskClassificationInstance(LightningModule):
         scores = scores[order]
 
         if bbox_preds is not None:
-            bbox_preds_img = bbox_preds[0][query_indices][order]
+            bbox_preds_img = bbox_preds[query_indices][order]
             boxes = box_convert(bbox_preds_img, "cxcywh", "xyxy").clamp(0, 1)
             scale = torch.tensor(
                 [img_size[1], img_size[0], img_size[1], img_size[0]],
@@ -181,7 +191,7 @@ class MaskClassificationInstance(LightningModule):
         img = imgs[random_idx]
         target = targets[random_idx]
 
-        pred = self._predict_instances_for_visualization(img)
+        pred = self._predict_instances_for_visualization(img,ingore_no_objets=True)
         target_boxes = target.get("boxes")
         if target_boxes is None:
             target_boxes = masks_to_boxes(target["masks"])
@@ -199,8 +209,21 @@ class MaskClassificationInstance(LightningModule):
             pred["labels"],
             None,
             pred["boxes"],
+            pred["scores"],
         )
-        pair_vis = np.concatenate((gt_vis, pred_vis), axis=1)
+        pred = self._predict_instances_for_visualization(img,ingore_no_objets=False)
+        target_boxes = target.get("boxes")
+        if target_boxes is None:
+            target_boxes = masks_to_boxes(target["masks"])
+        pred_vis_no_objets = COCOInstance.draw_one(
+            img,
+            pred["masks"],
+            pred["labels"],
+            None,
+            pred["boxes"],
+            pred["scores"],
+        )
+        pair_vis = np.concatenate((gt_vis, pred_vis, pred_vis_no_objets), axis=1)
 
         log_dir = getattr(self.logger, "log_dir", None)
         save_dir = Path(log_dir) if log_dir is not None else Path(self.trainer.default_root_dir)

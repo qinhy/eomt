@@ -304,7 +304,7 @@ class COCOInstance(LightningDataModule):
         )
     
     @staticmethod
-    def draw_one(img, masks, labels, is_crowd, boxes):
+    def draw_one(img, masks, labels, is_crowd, boxes, scores=None):
         """
         Args:
             img:
@@ -321,6 +321,9 @@ class COCOInstance(LightningDataModule):
             boxes:
                 tv_tensors.BoundingBoxes | torch.Tensor
                 shape: (N,4), XYXY
+            scores:
+                list[float] | torch.Tensor | None
+                optional confidence scores for each instance
 
         Returns:
             np.ndarray: RGB uint8 image, shape (H,W,3)
@@ -429,6 +432,13 @@ class COCOInstance(LightningDataModule):
         elif isinstance(is_crowd, torch.Tensor):
             is_crowd = is_crowd.detach().cpu().tolist()
 
+        if scores is None:
+            scores = [None] * len(masks)
+        elif isinstance(scores, torch.Tensor):
+            scores = scores.detach().cpu().tolist()
+        else:
+            scores = list(scores)
+
         alpha = 0.45
 
         for i, mask in enumerate(masks):
@@ -438,6 +448,7 @@ class COCOInstance(LightningDataModule):
 
             label = int(labels[i])
             crowd = bool(is_crowd[i])
+            score = scores[i] if i < len(scores) else None
             color = color_for_label(label).astype(np.float32)
 
             # mask overlay
@@ -459,6 +470,8 @@ class COCOInstance(LightningDataModule):
                 cv2.rectangle(out, (x1, y1), (x2, y2), color.tolist(), thickness)
 
                 text = label_to_name(label)
+                if score is not None:
+                    text += f" {float(score):.2f}"
                 if crowd:
                     text += " crowd"
 

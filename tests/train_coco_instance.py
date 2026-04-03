@@ -380,7 +380,7 @@ if __name__ == "__main__":
                     encoder_model='dinov3_vits16',
                     encoder_weights='../BitNetCNN/data/dinov3_vits16_pretrain_lvd1689m-08c60483.pth',
                     fsrcnnx2=True,
-                    precision="bf16-true",                    
+                    precision="bf16-true",
             ).cuda()
     with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
         img = torch.randn(1, 3, 1280, 1280).cuda()
