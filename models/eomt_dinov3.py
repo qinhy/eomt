@@ -93,22 +93,34 @@ class MaskResidualBoxHead(nn.Module):
     def __init__(self, hidden=64):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Conv2d(1, 8, 3, padding=1),
-            nn.GELU(),
-            nn.Conv2d(8, 16, 3, padding=1),
-            nn.GELU(),
-            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(3, 8, 3, padding=1), nn.GELU(),
+            nn.Conv2d(8, 16, 3, padding=1), nn.GELU(),
+            nn.AdaptiveAvgPool2d(2),
             nn.Flatten(),
-            nn.Linear(16, hidden),
-            nn.GELU(),
+            nn.Linear(16 * 2 * 2, hidden), nn.GELU(),
             nn.Linear(hidden, 4),
         )
+        self._coord_cache = {}
+
+    def get_coords(self, H, W, device, dtype, N):
+        key = (H, W, device.type, device.index, str(dtype))
+        if key not in self._coord_cache:
+            yy, xx = torch.meshgrid(
+                torch.linspace(-1, 1, H, device=device, dtype=dtype),
+                torch.linspace(-1, 1, W, device=device, dtype=dtype),
+                indexing="ij"
+            )
+            coord = torch.stack([xx, yy], dim=0).unsqueeze(0)   # [1,2,H,W]
+            self._coord_cache[key] = coord
+        return self._coord_cache[key].expand(N, -1, -1, -1)
 
     def forward(self, mask_logits):   # [B,Q,H,W]
         B, Q, H, W = mask_logits.shape
         x = mask_logits.reshape(B * Q, 1, H, W)
-        delta = self.net(x).reshape(B, Q, 4)
-        return delta
+        coord = self.get_coords(H, W, x.device, x.dtype, B * Q)
+        x = torch.cat([x, coord], dim=1)
+        x = self.net(x).reshape(B, Q, 4)
+        return x
     
 class EoMT(nn.Module):
     class Index:
@@ -178,7 +190,7 @@ class EoMT(nn.Module):
         if self.bbox_head_enabled:
         # bbox head 
             DD += 4
-            self.bbox_res = MaskResidualBoxHead()
+            self.bbox_res = MaskResidualBoxHead().to(dtype=dtype)
         self.output_head = nn.Sequential(
             nn.Linear(D, DD),  nn.GELU(),
             nn.Linear(DD, DD), nn.GELU(),
@@ -297,10 +309,11 @@ class EoMT(nn.Module):
 
         mask_logits = torch.einsum("bqc,bchw->bqhw", query_mask_feats, patch_tokens_map_x2)
         
+        bbox_preds = None
         if self.bbox_head_enabled:
             bbox_logits = output_logits[:, :, -4 :]
             bbox_logits = bbox_logits + self.bbox_res(mask_logits)
-        bbox_preds = bbox_logits.sigmoid() # normalized cxcywh in [0,1].
+            bbox_preds = bbox_logits.sigmoid() # normalized cxcywh in [0,1].
         return mask_logits, class_logits, bbox_preds
 
     def forward_dinov3_phase1(self, x: torch.Tensor):
@@ -423,21 +436,23 @@ class EoMT(nn.Module):
 
         return self.forward_dinov3(x,x)
 
-# if __name__ == "__main__":
-#     model = EoMT(num_q=200,
-#                  num_classes=80,
-#                  bbox_head_enabled=True,
-#                  encoder_repo='../dinov3',
-#                 #  encoder_model='dinov3_vitl16',
-#                 #  encoder_weights='../BitNetCNN/data/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth'
-#                  encoder_model='dinov3_vits16',
-#                  encoder_weights='../BitNetCNN/data/dinov3_vits16_pretrain_lvd1689m-08c60483.pth',
-#                 #  encoder=torch.hub.load('../dinov3', 'dinov3_vitl16', source='local',
-#                 #                     weights='../BitNetCNN/data/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth')                
-#                 #  encoder=torch.hub.load('../dinov3', 'dinov3_vits16', source='local',
-#                 #                     weights='../BitNetCNN/data/dinov3_vits16_pretrain_lvd1689m-08c60483.pth')
-#                 precision="bf16-true"
-#             ).cuda()
-#     img = torch.randn(1, 3, 320, 320).cuda().to(dtype=model.dtype)
-#     res = model(img)
-#     print(res)
+if __name__ == "__main__":
+    model = EoMT(num_q=200,
+                 num_classes=80,
+                 bbox_head_enabled=True,
+                 encoder_repo='../dinov3',
+                #  encoder_model='dinov3_vitl16',
+                #  encoder_weights='../BitNetCNN/data/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth'
+                 encoder_model='dinov3_vits16',
+                 encoder_weights='../BitNetCNN/data/dinov3_vits16_pretrain_lvd1689m-08c60483.pth',
+                #  encoder=torch.hub.load('../dinov3', 'dinov3_vitl16', source='local',
+                #                     weights='../BitNetCNN/data/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth')                
+                #  encoder=torch.hub.load('../dinov3', 'dinov3_vits16', source='local',
+                #                     weights='../BitNetCNN/data/dinov3_vits16_pretrain_lvd1689m-08c60483.pth')
+                precision="bf16-true"
+            ).cuda()
+    with torch.no_grad():
+        model.eval()
+        img = torch.randn(1, 3, 640, 640).cuda().to(dtype=model.dtype)
+        res = model.forward(img)
+    print(res)
