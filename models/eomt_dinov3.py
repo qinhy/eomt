@@ -89,6 +89,27 @@ class RandomResizeToMultipleOf16:
         new_w = max(self.patch_size, round(w * s / self.patch_size) * self.patch_size)
         return torchvision.transforms.functional.resize(img, [new_h, new_w])
     
+class MaskResidualBoxHead(nn.Module):
+    def __init__(self, hidden=64):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(1, 8, 3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(8, 16, 3, padding=1),
+            nn.GELU(),
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(16, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, 4),
+        )
+
+    def forward(self, mask_logits):   # [B,Q,H,W]
+        B, Q, H, W = mask_logits.shape
+        x = mask_logits.reshape(B * Q, 1, H, W)
+        delta = self.net(x).reshape(B, Q, 4)
+        return delta
+    
 class EoMT(nn.Module):
     class Index:
         def __init__(self,num_q,num_backbone_prefix_tokens):
@@ -157,6 +178,7 @@ class EoMT(nn.Module):
         if self.bbox_head_enabled:
         # bbox head 
             DD += 4
+            self.bbox_res = MaskResidualBoxHead()
         self.output_head = nn.Sequential(
             nn.Linear(D, DD),  nn.GELU(),
             nn.Linear(DD, DD), nn.GELU(),
@@ -266,12 +288,7 @@ class EoMT(nn.Module):
         cls_num = self.num_classes + 1
         class_logits = output_logits[:, :, : cls_num]
         query_mask_feats = output_logits[:, :, cls_num : (cls_num + self.encoder.embed_dim)]
-        
-        
-        if self.bbox_head_enabled:
-            bbox_logits = output_logits[:, :, -4 :]
-            bbox_preds = bbox_logits.sigmoid() # normalized cxcywh in [0,1].
-        
+                
         if patch_tokens_map_x2 is None:
             if self.upscale is not None:
                 patch_tokens_map_x2 = self.upscale(patch_tokens_map)
@@ -279,7 +296,11 @@ class EoMT(nn.Module):
                 patch_tokens_map_x2 = patch_tokens_map            
 
         mask_logits = torch.einsum("bqc,bchw->bqhw", query_mask_feats, patch_tokens_map_x2)
-
+        
+        if self.bbox_head_enabled:
+            bbox_logits = output_logits[:, :, -4 :]
+            bbox_preds = self.bbox_res(mask_logits) + bbox_logits
+        bbox_preds = bbox_logits.sigmoid() # normalized cxcywh in [0,1].
         return mask_logits, class_logits, bbox_preds
 
     def forward_dinov3_phase1(self, x: torch.Tensor):
