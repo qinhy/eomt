@@ -181,3 +181,5 @@ cython_debug/
 /logs
 /*.png
 train.bat
+.codex
+/dataset_cache

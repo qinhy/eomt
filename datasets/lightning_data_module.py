@@ -4,12 +4,35 @@
 # ---------------------------------------------------------------
 
 
+import os
 from typing import Optional
 import torch
-import lightning
+
+if os.environ.get("EOMT_DISABLE_LIGHTNING") != "1":
+    try:
+        import lightning
+    except ModuleNotFoundError:
+        lightning = None
+else:
+    lightning = None
 
 
-class LightningDataModule(lightning.LightningDataModule):
+class _LightningDataModuleFallback:
+    def __init__(self, *args, **kwargs) -> None:
+        pass
+
+    def save_hyperparameters(self, *args, **kwargs) -> None:
+        pass
+
+
+_LightningDataModuleBase = (
+    lightning.LightningDataModule
+    if lightning is not None
+    else _LightningDataModuleFallback
+)
+
+
+class LightningDataModule(_LightningDataModuleBase):
     def __init__(
         self,
         path,

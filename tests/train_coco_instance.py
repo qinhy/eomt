@@ -1,59 +1,30 @@
 import argparse
+import csv
+import json
+import os
+import random
 import sys
+import time
 import warnings
+from contextlib import nullcontext
 from pathlib import Path
-from types import MethodType
+from types import SimpleNamespace
+from typing import Any
 
-import torch
-from lightning.fabric.utilities.seed import seed_everything
-from lightning.pytorch import Trainer
-from lightning.pytorch.callbacks import LearningRateMonitor, ModelSummary
-from lightning.pytorch.loggers import CSVLogger
-from lightning.pytorch.loops.fetchers import _DataFetcher, _DataLoaderIterDataFetcher
-from lightning.pytorch.loops.training_epoch_loop import _TrainingEpochLoop
+import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+os.environ.setdefault("EOMT_DISABLE_LIGHTNING", "1")
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+import torch
+from torch.cuda.amp import GradScaler
+from torch.nn.utils import clip_grad_norm_
 from datasets.coco_instance import COCOInstance
 from models.eomt_dinov3 import EoMT
 from training.mask_classification_instance import MaskClassificationInstance
 
-
-def _should_check_val_fx(
-    self: _TrainingEpochLoop, data_fetcher: _DataFetcher
-) -> bool:
-    if not self._should_check_val_epoch():
-        return False
-
-    is_infinite_dataset = self.trainer.val_check_batch == float("inf")
-    is_last_batch = self.batch_progress.is_last_batch
-    if is_last_batch and (
-        is_infinite_dataset or isinstance(data_fetcher, _DataLoaderIterDataFetcher)
-    ):
-        return True
-
-    if self.trainer.should_stop and self.trainer.fit_loop._can_stop_early:
-        return True
-
-    is_val_check_batch = is_last_batch
-    if isinstance(self.trainer.limit_train_batches, int) and is_infinite_dataset:
-        is_val_check_batch = (
-            self.batch_idx + 1
-        ) % self.trainer.limit_train_batches == 0
-    elif self.trainer.val_check_batch != float("inf"):
-        if self.trainer.check_val_every_n_epoch is not None:
-            is_val_check_batch = (
-                self.batch_idx + 1
-            ) % self.trainer.val_check_batch == 0
-        else:
-            is_val_check_batch = (
-                self.global_step % self.trainer.val_check_batch == 0
-                and not self._should_accumulate()
-            )
-
-    return is_val_check_batch
 
 
 def _default_encoder_repo() -> Path:
@@ -75,7 +46,7 @@ def _default_precision(accelerator: str) -> str:
         return "32-true"
     if accelerator == "auto" and not torch.cuda.is_available():
         return "32-true"
-    return "16-mixed"
+    return "bf16-true"
 
 
 def _validate_paths(args: argparse.Namespace) -> None:
@@ -106,7 +77,7 @@ def _validate_paths(args: argparse.Namespace) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Standalone COCO instance training script for EoMT DINOv3."
+        description="Standalone pure PyTorch COCO instance training script for EoMT DINOv3."
     )
     parser.add_argument("--data-path", type=Path, required=True)
     parser.add_argument("--img-size", type=int, nargs=2, default=(640, 640))
@@ -115,13 +86,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scale-range", type=float, nargs=2, default=(0.1, 2.0))
     parser.add_argument("--max-epochs", type=int, default=12)
     parser.add_argument("--check-val-every-n-epoch", type=int, default=2)
+    parser.add_argument("--log-every-n-steps", type=int, default=20)
     parser.add_argument("--accelerator", default="auto")
     parser.add_argument("--devices", default="1")
-    parser.add_argument("--precision", default="bf16-true")
+    parser.add_argument("--precision", default=None)
     parser.add_argument("--log-dir", type=Path, default=REPO_ROOT / "logs")
     parser.add_argument(
         "--experiment-name",
-        default="coco_instance_eomt_large_640_dinov3_py",
+        default="coco_instance_eomt_large_640_dinov3_pure",
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--encoder-repo", type=Path, default=_default_encoder_repo())
@@ -297,36 +269,11 @@ def build_model(args: argparse.Namespace) -> MaskClassificationInstance:
     )
 
 
-def build_trainer(args: argparse.Namespace) -> Trainer:
-    logger = CSVLogger(
-        save_dir=str(args.log_dir),
-        name=args.experiment_name,
-    )
-    return Trainer(
-        accelerator=args.accelerator,
-        devices=args.devices,
-        max_epochs=args.max_epochs,
-        check_val_every_n_epoch=args.check_val_every_n_epoch,
-        precision=args.precision,
-        logger=logger,
-        enable_model_summary=False,
-        callbacks=[
-            ModelSummary(max_depth=3),
-            LearningRateMonitor(logging_interval="epoch"),
-        ],
-        gradient_clip_val=0.01,
-        gradient_clip_algorithm="norm",
-    )
-
-
 def configure_runtime() -> None:
     torch.set_float32_matmul_precision("medium")
-    torch._dynamo.config.capture_scalar_outputs = True
-    torch._dynamo.config.suppress_errors = True
-    warnings.filterwarnings(
-        "ignore",
-        message=r".*It is recommended to use .* when logging on epoch level in distributed setting to accumulate the metric across devices.*",
-    )
+    if hasattr(torch, "_dynamo") and hasattr(torch._dynamo, "config"):
+        torch._dynamo.config.capture_scalar_outputs = True
+        torch._dynamo.config.suppress_errors = True
     warnings.filterwarnings(
         "ignore",
         message=r"^The ``compute`` method of metric PanopticQuality was called before the ``update`` method.*",
@@ -344,146 +291,494 @@ def configure_runtime() -> None:
     )
 
 
+def seed_everything(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def resolve_device(args: argparse.Namespace) -> torch.device:
+    if args.devices not in (1, "1", "auto"):
+        raise ValueError(
+            "Pure PyTorch training currently supports a single device only. Use --devices 1."
+        )
+
+    accelerator = str(args.accelerator).lower()
+    if accelerator == "cpu":
+        return torch.device("cpu")
+    if accelerator in {"cuda", "gpu"}:
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA was requested but no CUDA device is available.")
+        return torch.device("cuda")
+    if accelerator == "mps":
+        if not torch.backends.mps.is_available():
+            raise RuntimeError("MPS was requested but is not available.")
+        return torch.device("mps")
+    if accelerator == "auto":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if torch.backends.mps.is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
+
+    raise ValueError(f"Unsupported accelerator: {args.accelerator}")
+
+
+def resolve_amp(
+    device: torch.device,
+    precision: str,
+) -> tuple[bool, torch.dtype | None, bool]:
+    precision = precision.lower()
+
+    if device.type == "cuda":
+        if precision in {"bf16", "bf16-true", "bf16-mixed"}:
+            return True, torch.bfloat16, False
+        if precision in {"16", "16-true", "16-mixed", "fp16", "fp16-mixed"}:
+            return True, torch.float16, True
+
+    return False, None, False
+
+
+def autocast_context(
+    device: torch.device,
+    amp_enabled: bool,
+    amp_dtype: torch.dtype | None,
+):
+    if not amp_enabled or amp_dtype is None:
+        return nullcontext()
+    return torch.autocast(device_type=device.type, dtype=amp_dtype)
+
+
+def move_to_device(obj: Any, device: torch.device) -> Any:
+    if isinstance(obj, torch.Tensor):
+        return obj.to(device=device, non_blocking=True)
+    if isinstance(obj, dict):
+        return {key: move_to_device(value, device) for key, value in obj.items()}
+    if isinstance(obj, tuple):
+        return tuple(move_to_device(value, device) for value in obj)
+    if isinstance(obj, list):
+        return [move_to_device(value, device) for value in obj]
+    return obj
+
+
+def to_scalar(value: Any) -> float | None:
+    if isinstance(value, torch.Tensor):
+        if value.numel() != 1:
+            return None
+        value = value.detach().cpu().item()
+
+    if isinstance(value, np.generic):
+        value = value.item()
+
+    if isinstance(value, bool):
+        return float(int(value))
+    if isinstance(value, (int, float)):
+        return float(value)
+
+    return None
+
+
+class MetricCSVLogger:
+    def __init__(self, log_dir: Path) -> None:
+        self.log_dir = log_dir
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        self.metrics_path = self.log_dir / "metrics.csv"
+        self._file = self.metrics_path.open("a", newline="", encoding="utf-8")
+        self._writer = csv.DictWriter(
+            self._file,
+            fieldnames=("timestamp", "epoch", "step", "phase", "name", "value"),
+        )
+        if self.metrics_path.stat().st_size == 0:
+            self._writer.writeheader()
+            self._file.flush()
+
+    def save_hparams(self, args: argparse.Namespace) -> None:
+        with (self.log_dir / "hparams.json").open("w", encoding="utf-8") as file:
+            json.dump(vars(args), file, indent=2, default=str)
+
+    def log_metrics(
+        self,
+        phase: str,
+        epoch: int,
+        step: int,
+        metrics: dict[str, Any],
+    ) -> None:
+        timestamp = time.time()
+        for name, value in sorted(metrics.items()):
+            scalar = to_scalar(value)
+            if scalar is None:
+                continue
+            self._writer.writerow(
+                {
+                    "timestamp": f"{timestamp:.6f}",
+                    "epoch": epoch,
+                    "step": step,
+                    "phase": phase,
+                    "name": name,
+                    "value": f"{scalar:.10f}",
+                }
+            )
+        self._file.flush()
+
+    def close(self) -> None:
+        self._file.close()
+
+
+def resolve_run_dir(args: argparse.Namespace) -> Path:
+    if args.resume_from_checkpoint is not None:
+        checkpoint_dir = args.resume_from_checkpoint.parent
+        if checkpoint_dir.name == "checkpoints":
+            return checkpoint_dir.parent
+        return checkpoint_dir
+
+    return args.log_dir / args.experiment_name
+
+
+def sanitize_state_dict(state_dict: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key.replace("._orig_mod", ""): value
+        for key, value in state_dict.items()
+    }
+
+
+def cpu_state_dict(state_dict: dict[str, Any]) -> dict[str, Any]:
+    result = {}
+    for key, value in sanitize_state_dict(state_dict).items():
+        if isinstance(value, torch.Tensor):
+            result[key] = value.detach().cpu()
+        else:
+            result[key] = value
+    return result
+
+
+def drain_model_metrics(model: MaskClassificationInstance) -> dict[str, Any]:
+    if hasattr(model, "consume_logged_metrics"):
+        return model.consume_logged_metrics()
+    return {}
+
+
+def build_runtime(total_steps: int, run_dir: Path) -> SimpleNamespace:
+    return SimpleNamespace(
+        estimated_stepping_batches=total_steps,
+        callback_metrics={},
+        sanity_checking=False,
+        is_global_zero=True,
+        default_root_dir=str(run_dir),
+    )
+
+
+def save_checkpoint(
+    path: Path,
+    model: MaskClassificationInstance,
+    optimizer: torch.optim.Optimizer,
+    scheduler,
+    scaler: GradScaler | None,
+    epoch: int,
+    best_val_ap_all: float,
+) -> None:
+    callback_metrics = {
+        key: to_scalar(value)
+        for key, value in getattr(model.trainer, "callback_metrics", {}).items()
+    }
+    callback_metrics = {
+        key: value for key, value in callback_metrics.items() if value is not None
+    }
+
+    checkpoint = {
+        "model_state_dict": cpu_state_dict(model.state_dict()),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "scheduler_state_dict": scheduler.state_dict(),
+        "epoch": epoch,
+        "global_step": int(model.global_step),
+        "best_val_ap_all": best_val_ap_all,
+        "callback_metrics": callback_metrics,
+    }
+    if scaler is not None:
+        checkpoint["scaler_state_dict"] = scaler.state_dict()
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(checkpoint, path)
+
+
+def load_training_state(
+    checkpoint_path: Path,
+    model: MaskClassificationInstance,
+    optimizer: torch.optim.Optimizer,
+    scheduler,
+    scaler: GradScaler | None,
+) -> tuple[int, float]:
+    checkpoint = torch.load(
+        checkpoint_path,
+        map_location="cpu",
+        weights_only=False,
+    )
+
+    model_state_dict = checkpoint.get("model_state_dict")
+    if model_state_dict is None:
+        model_state_dict = checkpoint.get("state_dict", checkpoint)
+
+    incompatible = model.load_state_dict(
+        sanitize_state_dict(model_state_dict),
+        strict=False,
+    )
+    if incompatible.missing_keys or incompatible.unexpected_keys:
+        raise ValueError(
+            "Resume checkpoint is incompatible.\n"
+            f"Missing keys: {incompatible.missing_keys}\n"
+            f"Unexpected keys: {incompatible.unexpected_keys}"
+        )
+
+    optimizer_state = checkpoint.get("optimizer_state_dict")
+    if optimizer_state is None and checkpoint.get("optimizer_states"):
+        optimizer_state = checkpoint["optimizer_states"][0]
+    if optimizer_state is not None:
+        optimizer.load_state_dict(optimizer_state)
+
+    scheduler_state = checkpoint.get("scheduler_state_dict")
+    if scheduler_state is None and checkpoint.get("lr_schedulers"):
+        scheduler_state = checkpoint["lr_schedulers"][0]
+    if scheduler_state is not None:
+        scheduler.load_state_dict(scheduler_state)
+
+    scaler_state = checkpoint.get("scaler_state_dict")
+    if scaler is not None and scaler_state is not None:
+        scaler.load_state_dict(scaler_state)
+
+    callback_metrics = {
+        key: value
+        for key, value in checkpoint.get("callback_metrics", {}).items()
+        if to_scalar(value) is not None
+    }
+    model.trainer.callback_metrics.update(callback_metrics)
+    model.global_step = int(checkpoint.get("global_step", 0))
+
+    start_epoch = int(checkpoint.get("epoch", -1)) + 1
+    best_val_ap_all = float(
+        checkpoint.get(
+            "best_val_ap_all",
+            callback_metrics.get("metrics/val_ap_all", float("-inf")),
+        )
+    )
+    return start_epoch, best_val_ap_all
+
+
+def format_metrics(metrics: dict[str, Any], names: list[str]) -> str:
+    items = []
+    for name in names:
+        value = to_scalar(metrics.get(name))
+        if value is not None:
+            items.append(f"{name}={value:.4f}")
+    return " | ".join(items)
+
+
+def train_one_epoch(
+    model: MaskClassificationInstance,
+    train_loader,
+    optimizer: torch.optim.Optimizer,
+    scheduler,
+    scaler: GradScaler | None,
+    device: torch.device,
+    amp_enabled: bool,
+    amp_dtype: torch.dtype | None,
+    logger: MetricCSVLogger,
+    epoch: int,
+    log_every_n_steps: int,
+) -> None:
+    model.train()
+
+    for batch_idx, batch in enumerate(train_loader):
+        batch = move_to_device(batch, device)
+        optimizer.zero_grad(set_to_none=True)
+
+        with autocast_context(device, amp_enabled, amp_dtype):
+            loss = model.training_step(batch, batch_idx)
+
+        if scaler is not None and scaler.is_enabled():
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            clip_grad_norm_(model.parameters(), max_norm=0.01)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            clip_grad_norm_(model.parameters(), max_norm=0.01)
+            optimizer.step()
+
+        scheduler.step()
+        model.global_step = int(model.global_step) + 1
+        model.on_train_batch_end(loss.detach(), batch, batch_idx)
+
+        step_metrics = drain_model_metrics(model)
+        step_metrics["lr/min"] = min(group["lr"] for group in optimizer.param_groups)
+        step_metrics["lr/max"] = max(group["lr"] for group in optimizer.param_groups)
+        logger.log_metrics("train", epoch + 1, int(model.global_step), step_metrics)
+
+        should_print = (
+            batch_idx == 0
+            or (batch_idx + 1) % log_every_n_steps == 0
+            or batch_idx + 1 == len(train_loader)
+        )
+        if should_print:
+            message = format_metrics(
+                step_metrics,
+                [
+                    "loss_total",
+                    "mask",
+                    "dice",
+                    "cls",
+                    "bbox",
+                    "giou",
+                    "lr/max",
+                ],
+            )
+            prefix = (
+                f"Epoch {epoch + 1}/{getattr(model, 'max_epochs', '?')} "
+                f"Batch {batch_idx + 1}/{len(train_loader)} "
+                f"Step {int(model.global_step)}"
+            )
+            print(f"{prefix} | {message}" if message else prefix)
+
+
+def validate(
+    model: MaskClassificationInstance,
+    val_loader,
+    device: torch.device,
+    logger: MetricCSVLogger,
+    epoch: int,
+) -> dict[str, Any]:
+    model.eval()
+    model.trainer.callback_metrics.clear()
+
+    with torch.inference_mode():
+        for batch_idx, batch in enumerate(val_loader):
+            batch = move_to_device(batch, device)
+            model.validation_step(batch, batch_idx)
+
+    model.on_validation_epoch_end()
+    metrics = drain_model_metrics(model)
+    logger.log_metrics("val", epoch + 1, int(model.global_step), metrics)
+    model.on_validation_end()
+    return metrics
+
+
 def main() -> None:
     args = parse_args()
     configure_runtime()
-    seed_everything(args.seed, workers=True)
+    seed_everything(args.seed)
+
+    device = resolve_device(args)
+    amp_enabled, amp_dtype, use_scaler = resolve_amp(device, args.precision)
+    scaler = torch.amp.GradScaler(device=device,enabled=use_scaler)
+
+    run_dir = resolve_run_dir(args)
+    logger = MetricCSVLogger(run_dir)
+    logger.save_hparams(args)
 
     datamodule = build_datamodule(args)
+    datamodule.setup()
+    train_loader = datamodule.train_dataloader()
+    val_loader = datamodule.val_dataloader()
+
     model = build_model(args)
-    trainer = build_trainer(args)
-
-    trainer.fit_loop.epoch_loop._should_check_val_fx = MethodType(
-        _should_check_val_fx, trainer.fit_loop.epoch_loop
+    model.max_epochs = args.max_epochs
+    model.to(device)
+    model.logger = SimpleNamespace(log_dir=str(run_dir))
+    model.trainer = build_runtime(
+        total_steps=len(train_loader) * args.max_epochs,
+        run_dir=run_dir,
     )
 
-    model.train()
-    trainable_model = torch.compile(model) if args.compile else model
-    trainer.fit(
-        trainable_model,
-        datamodule=datamodule,
-        ckpt_path=(
-            str(args.resume_from_checkpoint)
-            if args.resume_from_checkpoint is not None
-            else None
-        ),
+    optim_config = model.configure_optimizers()
+    optimizer = optim_config["optimizer"]
+    scheduler = optim_config["lr_scheduler"]["scheduler"]
+
+    start_epoch = 0
+    best_val_ap_all = float("-inf")
+    if args.resume_from_checkpoint is not None:
+        start_epoch, best_val_ap_all = load_training_state(
+            args.resume_from_checkpoint,
+            model,
+            optimizer,
+            scheduler,
+            scaler,
+        )
+
+    if args.compile:
+        model.network = torch.compile(model.network)
+
+    print(
+        f"Training on {device} with precision={args.precision}, "
+        f"log_dir={run_dir}"
     )
+
+    try:
+        for epoch in range(start_epoch, args.max_epochs):
+            model.current_epoch = epoch
+            epoch_start = time.time()
+
+            train_one_epoch(
+                model=model,
+                train_loader=train_loader,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                scaler=scaler,
+                device=device,
+                amp_enabled=amp_enabled,
+                amp_dtype=amp_dtype,
+                logger=logger,
+                epoch=epoch,
+                log_every_n_steps=args.log_every_n_steps,
+            )
+
+            should_validate = (
+                (epoch + 1) % args.check_val_every_n_epoch == 0
+                or epoch + 1 == args.max_epochs
+            )
+            if should_validate:
+                val_metrics = validate(
+                    model=model,
+                    val_loader=val_loader,
+                    device=device,
+                    logger=logger,
+                    epoch=epoch,
+                )
+                current_val_ap_all = to_scalar(val_metrics.get("metrics/val_ap_all"))
+                if (
+                    current_val_ap_all is not None
+                    and current_val_ap_all > best_val_ap_all
+                ):
+                    best_val_ap_all = current_val_ap_all
+                    save_checkpoint(
+                        run_dir / "checkpoints" / "best.pt",
+                        model,
+                        optimizer,
+                        scheduler,
+                        scaler,
+                        epoch,
+                        best_val_ap_all,
+                    )
+
+            save_checkpoint(
+                run_dir / "checkpoints" / "last.pt",
+                model,
+                optimizer,
+                scheduler,
+                scaler,
+                epoch,
+                best_val_ap_all,
+            )
+
+            logger.log_metrics(
+                "epoch",
+                epoch + 1,
+                int(model.global_step),
+                {"epoch/duration_sec": time.time() - epoch_start},
+            )
+    finally:
+        logger.close()
 
 
 if __name__ == "__main__":
     main()
-
-    model = EoMT(num_q=200,
-                    num_classes=80,
-                    bbox_head_enabled=True,
-                    encoder_repo='../dinov3',
-                    encoder_model='dinov3_vits16',
-                    encoder_weights='../BitNetCNN/data/dinov3_vits16_pretrain_lvd1689m-08c60483.pth',
-                    fsrcnnx2=True,
-                    precision="bf16-true",
-            ).cuda()
-    with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
-        img = torch.randn(1, 3, 1280, 1280).cuda()
-        res = model.forward(img)
-    print(res)
-
-    # dinov3_vits16
-    # 160 400MB
-    # 320 900MB
-    # 640 3GB
-    # 720 3.5GB
-    import cv2
-    from training.mask_classification_loss import MaskClassificationLoss
-
-    dataset = COCOInstance(path="D:/images.cocodataset.org",num_workers=0,batch_size=1)
-    dataset.setup()
-    vl = dataset.val_dataloader()
-    batch = next(iter(vl))
-    imgs,targets = batch
-    tl = dataset.train_dataloader()
-    batch = next(iter(tl))
-    imgs,targets = batch
-    imgs = imgs.cuda()
-
-    masks, labels, is_crowd, boxes = targets[0]["masks"], targets[0]["labels"], targets[0]["is_crowd"], targets[0]["boxes"]
-    vis = COCOInstance.draw_one(imgs[0], masks, labels, is_crowd, boxes)
-    cv2.imwrite("vis.png", vis)
-    cv2.imwrite("vis_up.png", (model.fsrcnnx2(imgs/255.0)[0]*255.0).to(torch.uint8).permute(1,2,0).cpu().numpy())
-
-    mask_logits_per_block, class_logits_per_block, bbox_preds_per_block = model.forward(imgs/255.0)
-
-
-    criterion = MaskClassificationLoss(num_points=12544,
-                                        oversample_ratio=3.0,
-                                        importance_sample_ratio=0.75,
-                                        mask_coefficient=5.0,
-                                        dice_coefficient=5.0,
-                                        class_coefficient=2.0,
-                                        num_labels=80,
-                                        no_object_coefficient=0.1,
-                                        bbox_l1_coefficient=5.0,
-                                        bbox_giou_coefficient=2.0).cuda()
-
-    losses = criterion(masks_queries_logits=mask_logits_per_block[-1],
-                        class_queries_logits=class_logits_per_block[-1],
-                        bbox_queries_preds=bbox_preds_per_block[-1],
-                        targets=targets)
-    print(losses)
-
-
-    # with torch.no_grad():
-    #     # pick image 0 from the batch
-    #     pred_logits = class_logits_per_block[-1][0]   # (Q, C) or (Q, C+1)
-    #     pred_masks  = mask_logits_per_block[-1][0]    # (Q, Hm, Wm)
-    #     pred_boxes  = bbox_preds_per_block[-1][0]     # (Q, 4)
-
-    #     # class scores
-    #     probs = pred_logits.softmax(-1)
-
-    #     # if your classifier has a "no-object" last class, use probs[..., :-1]
-    #     scores, pred_labels = probs.max(-1)
-
-    #     # keep only confident queries
-    #     keep = scores > 0.5
-
-    #     pred_labels = pred_labels[keep]
-    #     pred_masks  = pred_masks[keep]
-    #     pred_boxes  = pred_boxes[keep]
-
-    #     # resize masks to image size if needed
-    #     H, W = imgs[0].shape[-2:] if imgs[0].ndim == 3 else imgs[0].shape[:2]
-    #     if pred_masks.shape[-2:] != (H, W):
-    #         pred_masks = torch.nn.functional.interpolate(
-    #             pred_masks[:, None],
-    #             size=(H, W),
-    #             mode="bilinear",
-    #             align_corners=False,
-    #         )[:, 0]
-
-    #     # logits -> bool masks
-    #     pred_masks = pred_masks.sigmoid() > 0.5
-
-    #     # predictions do not have is_crowd; use all False
-    #     pred_is_crowd = [False] * len(pred_labels)
-
-    #     # If pred_boxes are already XYXY in image coordinates, keep as-is.
-    #     # If they are normalized cxcywh, convert first:
-    #     #
-    #     pred_boxes = box_convert(pred_boxes, in_fmt="cxcywh", out_fmt="xyxy")
-    #     pred_boxes[:, [0, 2]] *= W
-    #     pred_boxes[:, [1, 3]] *= H
-        
-    #     # If they are normalized xyxy:
-        
-    #     # pred_boxes[:, [0, 2]] *= W
-    #     # pred_boxes[:, [1, 3]] *= H
-
-    #     vis = COCOInstance.draw_one(
-    #         imgs[0],
-    #         pred_masks,
-    #         pred_labels,
-    #         pred_is_crowd,
-    #         pred_boxes,
-    #     )
-
-

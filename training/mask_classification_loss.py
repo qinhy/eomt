@@ -418,7 +418,7 @@ class MaskClassificationLoss(Mask2FormerLoss):
             total = weighted_loss if total is None else total + weighted_loss
 
         log_fn(
-            "losses/train_loss_total",
+            "loss_total",
             total.detach(),
             on_step=True,
             on_epoch=False,

@@ -9,9 +9,9 @@
 # ---------------------------------------------------------------
 
 import math
+import os
+from types import SimpleNamespace
 from typing import Optional, cast
-import lightning
-from lightning.fabric.utilities import rank_zero_info
 import torch
 import torch.nn as nn
 from torch.optim import AdamW
@@ -34,6 +34,72 @@ from torch.nn.functional import interpolate
 from torchvision.transforms.v2.functional import pad
 import logging
 
+if os.environ.get("EOMT_DISABLE_LIGHTNING") != "1":
+    try:
+        import lightning
+        from lightning.fabric.utilities import rank_zero_info
+    except ModuleNotFoundError:
+        lightning = None
+else:
+    lightning = None
+
+if lightning is None:
+    def rank_zero_info(message: str) -> None:
+        print(message)
+
+
+class _LightningModuleFallback(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.global_step = 0
+        self.current_epoch = 0
+        self.logger = None
+        self.trainer = SimpleNamespace(
+            callback_metrics={},
+            sanity_checking=False,
+            is_global_zero=True,
+            default_root_dir=".",
+        )
+        self._logged_metrics: dict[str, object] = {}
+
+    @property
+    def device(self) -> torch.device:
+        parameter = next(self.parameters(), None)
+        if parameter is not None:
+            return parameter.device
+
+        buffer = next(self.buffers(), None)
+        if buffer is not None:
+            return buffer.device
+
+        return torch.device("cpu")
+
+    def save_hyperparameters(self, *args, **kwargs) -> None:
+        pass
+
+    def log(self, name, value, *args, **kwargs) -> None:
+        if isinstance(value, torch.Tensor):
+            value = value.detach()
+            if value.numel() == 1:
+                value = float(value.item())
+            else:
+                value = value.cpu()
+
+        self._logged_metrics[name] = value
+        callback_metrics = getattr(self.trainer, "callback_metrics", None)
+        if isinstance(callback_metrics, dict):
+            callback_metrics[name] = value
+
+    def consume_logged_metrics(self) -> dict[str, object]:
+        metrics = dict(self._logged_metrics)
+        self._logged_metrics.clear()
+        return metrics
+
+
+_LightningModuleBase = (
+    lightning.LightningModule if lightning is not None else _LightningModuleFallback
+)
+
 from models import EoMT
 from training.mask_classification_loss import MaskClassificationLoss
 from training.two_stage_warmup_poly_schedule import TwoStageWarmupPolySchedule
@@ -42,7 +108,7 @@ bold_green = "\033[1;32m"
 reset = "\033[0m"
 
 
-class LightningModule(lightning.LightningModule):
+class LightningModule(_LightningModuleBase):
     def __init__(
         self,
         network: EoMT,
@@ -185,6 +251,7 @@ class LightningModule(lightning.LightningModule):
         x2 = None
 
         if imgs2 is not None:
+            assert imgs2.dtype == torch.uint8, "input image should be raw uint8 images"
             x2 = imgs2 / 255.0
 
         return self.network.forward(x,x2)
