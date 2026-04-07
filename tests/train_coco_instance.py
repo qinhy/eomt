@@ -572,7 +572,6 @@ def format_metrics(metrics: dict[str, Any], names: list[str]) -> str:
             items.append(f"{name}={value:.4f}")
     return " | ".join(items)
 
-
 def train_one_epoch(
     model: MaskClassificationInstance,
     train_loader,
@@ -588,6 +587,9 @@ def train_one_epoch(
 ) -> None:
     model.train()
 
+    skipped_nonfinite_loss = 0
+    skipped_nonfinite_grad = 0
+
     for batch_idx, batch in enumerate(train_loader):
         batch = move_to_device(batch, device)
         optimizer.zero_grad(set_to_none=True)
@@ -595,24 +597,88 @@ def train_one_epoch(
         with autocast_context(device, amp_enabled, amp_dtype):
             loss = model.training_step(batch, batch_idx)
 
-        if scaler is not None and scaler.is_enabled():
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            clip_grad_norm_(model.parameters(), max_norm=0.01)
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            loss.backward()
-            clip_grad_norm_(model.parameters(), max_norm=0.01)
-            optimizer.step()
+        # 1) Guard the loss itself
+        if not torch.isfinite(loss):
+            skipped_nonfinite_loss += 1
+            print(
+                f"[WARN] Skipping batch {batch_idx + 1}/{len(train_loader)} "
+                f"at epoch {epoch + 1}: non-finite loss={loss.detach().item()}"
+            )
+            optimizer.zero_grad(set_to_none=True)
+            continue
 
-        scheduler.step()
-        model.global_step = int(model.global_step) + 1
+        stepped = False
+
+        try:
+            if scaler is not None and scaler.is_enabled():
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+
+                grad_norm = clip_grad_norm_(
+                    model.parameters(),
+                    max_norm=0.01,
+                    error_if_nonfinite=True,
+                )
+
+                # extra explicit check
+                if not torch.isfinite(grad_norm):
+                    skipped_nonfinite_grad += 1
+                    print(
+                        f"[WARN] Skipping optimizer step at batch {batch_idx + 1}: "
+                        f"non-finite grad_norm={grad_norm.detach().item()}"
+                    )
+                    optimizer.zero_grad(set_to_none=True)
+                    scaler.update()
+                    continue
+
+                scaler.step(optimizer)
+                scaler.update()
+                stepped = True
+
+            else:
+                loss.backward()
+
+                grad_norm = clip_grad_norm_(
+                    model.parameters(),
+                    max_norm=0.01,
+                    error_if_nonfinite=True,
+                )
+
+                if not torch.isfinite(grad_norm):
+                    skipped_nonfinite_grad += 1
+                    print(
+                        f"[WARN] Skipping optimizer step at batch {batch_idx + 1}: "
+                        f"non-finite grad_norm={grad_norm.detach().item()}"
+                    )
+                    optimizer.zero_grad(set_to_none=True)
+                    continue
+
+                optimizer.step()
+                stepped = True
+
+        except RuntimeError as e:
+            skipped_nonfinite_grad += 1
+            print(
+                f"[WARN] RuntimeError during backward/step at batch {batch_idx + 1}: {e}"
+            )
+            optimizer.zero_grad(set_to_none=True)
+            if scaler is not None and scaler.is_enabled():
+                scaler.update()
+            continue
+
+        # only advance scheduler/global_step if optimizer actually stepped
+        if stepped:
+            scheduler.step()
+            model.global_step = int(model.global_step) + 1
+
         model.on_train_batch_end(loss.detach(), batch, batch_idx)
 
         step_metrics = drain_model_metrics(model)
         step_metrics["lr/min"] = min(group["lr"] for group in optimizer.param_groups)
         step_metrics["lr/max"] = max(group["lr"] for group in optimizer.param_groups)
+        step_metrics["skipped/nonfinite_loss"] = skipped_nonfinite_loss
+        step_metrics["skipped/nonfinite_grad"] = skipped_nonfinite_grad
+
         logger.log_metrics("train", epoch + 1, int(model.global_step), step_metrics)
 
         should_print = (
@@ -631,6 +697,8 @@ def train_one_epoch(
                     "bbox",
                     "giou",
                     "lr/max",
+                    "skipped/nonfinite_loss",
+                    "skipped/nonfinite_grad",
                 ],
             )
             prefix = (
@@ -639,7 +707,6 @@ def train_one_epoch(
                 f"Step {int(model.global_step)}"
             )
             print(f"{prefix} | {message}" if message else prefix)
-
 
 def validate(
     model: MaskClassificationInstance,
