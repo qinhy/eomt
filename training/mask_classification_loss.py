@@ -16,7 +16,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from scipy.optimize import linear_sum_assignment
 from torchvision import tv_tensors
-from torchvision.ops import box_convert, generalized_box_iou
+from torchvision.ops import box_convert, generalized_box_iou, generalized_box_iou_loss
 
 from transformers.models.mask2former.modeling_mask2former import (
     Mask2FormerLoss,
@@ -331,24 +331,19 @@ class MaskClassificationLoss(Mask2FormerLoss):
         losses.update(loss_labels)
         if has_boxes:
             losses.update(loss_boxes)
-
-        for key, value in losses.items():
-            if not torch.isfinite(value):
-                losses[key] = torch.tensor(0.0, device=device, dtype=dtype)
-                                
         return losses
 
     def loss_boxes(
         self,
         bbox_queries_preds: torch.Tensor,   # [B, Q, 4], normalized cxcywh
-        box_labels: List[torch.Tensor],     # list[[Ni, 4]], normalized cxcywh
+        box_labels: list[torch.Tensor],     # list[[Ni, 4]], normalized cxcywh
         indices,
         num_instances: torch.Tensor,
     ):
         src_idx = self._get_predictions_permutation_indices(indices)
+        zero = bbox_queries_preds.sum() * 0.0
 
         if src_idx[0].numel() == 0:
-            zero = bbox_queries_preds.sum() * 0.0
             return {"loss_bbox": zero, "loss_giou": zero}
 
         src_boxes = bbox_queries_preds[src_idx]
@@ -357,17 +352,60 @@ class MaskClassificationLoss(Mask2FormerLoss):
             dim=0,
         ).to(src_boxes)
 
-        # L1 in cxcywh
-        loss_bbox = F.l1_loss(src_boxes, target_boxes, reduction="none").sum()
+        # 1) Drop pairs that are already NaN / Inf in cxcywh
+        finite_cxcywh = (
+            torch.isfinite(src_boxes).all(dim=1) &
+            torch.isfinite(target_boxes).all(dim=1)
+        )
 
-        # GIoU in xyxy
+        if not finite_cxcywh.any():
+            return {"loss_bbox": zero, "loss_giou": zero}
+
+        src_boxes = src_boxes[finite_cxcywh]
+        target_boxes = target_boxes[finite_cxcywh]
+
+        # 2) Convert to xyxy and clamp to image range
         src_xyxy = box_convert(src_boxes, "cxcywh", "xyxy").clamp(0, 1)
         tgt_xyxy = box_convert(target_boxes, "cxcywh", "xyxy").clamp(0, 1)
-        loss_giou = (1.0 - torch.diag(generalized_box_iou(src_xyxy, tgt_xyxy))).sum()
 
+        # 3) Keep only valid xyxy pairs
+        valid_xyxy = (
+            torch.isfinite(src_xyxy).all(dim=1) &
+            torch.isfinite(tgt_xyxy).all(dim=1) &
+            (src_xyxy[:, 2] > src_xyxy[:, 0]) &
+            (src_xyxy[:, 3] > src_xyxy[:, 1]) &
+            (tgt_xyxy[:, 2] > tgt_xyxy[:, 0]) &
+            (tgt_xyxy[:, 3] > tgt_xyxy[:, 1])
+        )
+
+        if not valid_xyxy.any():
+            return {"loss_bbox": zero, "loss_giou": zero}
+
+        # If you want to ignore bad pairs entirely, use the same mask for both losses
+        src_boxes = src_boxes[valid_xyxy]
+        target_boxes = target_boxes[valid_xyxy]
+        src_xyxy = src_xyxy[valid_xyxy]
+        tgt_xyxy = tgt_xyxy[valid_xyxy]
+
+        # L1 in cxcywh
+        loss_bbox = F.l1_loss(src_boxes, target_boxes, reduction="sum")
+
+        # GIoU in xyxy
+        loss_giou_vec = generalized_box_iou_loss(
+            src_xyxy.float(),
+            tgt_xyxy.float(),
+            reduction="none",
+            eps=1e-7,
+        )
+
+        # extra safety
+        finite_giou = torch.isfinite(loss_giou_vec)
+        loss_giou = loss_giou_vec[finite_giou].sum() if finite_giou.any() else zero
+
+        denom = num_instances.clamp_min(1)
         return {
-            "loss_bbox": loss_bbox / num_instances,
-            "loss_giou": loss_giou / num_instances,
+            "loss_bbox": loss_bbox / denom,
+            "loss_giou": loss_giou / denom,
         }
 
     def loss_total(self, losses_all_layers, log_fn) -> torch.Tensor:
