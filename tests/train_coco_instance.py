@@ -676,8 +676,8 @@ def train_one_epoch(
         step_metrics = drain_model_metrics(model)
         step_metrics["lr/min"] = min(group["lr"] for group in optimizer.param_groups)
         step_metrics["lr/max"] = max(group["lr"] for group in optimizer.param_groups)
-        step_metrics["skipped/nonfinite_loss"] = skipped_nonfinite_loss
-        step_metrics["skipped/nonfinite_grad"] = skipped_nonfinite_grad
+        # step_metrics["skipped/nonfinite_loss"] = skipped_nonfinite_loss
+        # step_metrics["skipped/nonfinite_grad"] = skipped_nonfinite_grad
 
         logger.log_metrics("train", epoch + 1, int(model.global_step), step_metrics)
 
@@ -697,8 +697,8 @@ def train_one_epoch(
                     "bbox",
                     "giou",
                     "lr/max",
-                    "skipped/nonfinite_loss",
-                    "skipped/nonfinite_grad",
+                    # "skipped/nonfinite_loss",
+                    # "skipped/nonfinite_grad",
                 ],
             )
             prefix = (
