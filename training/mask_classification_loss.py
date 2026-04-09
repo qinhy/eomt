@@ -310,32 +310,32 @@ class MaskClassificationLoss(Mask2FormerLoss):
         num_instances = self.get_num_instances(class_labels, device=device)
 
         losses = {}
-        losses.update(
-            super().loss_masks(
+        loss_masks = super().loss_masks(
                 masks_queries_logits=masks_queries_logits,
                 mask_labels=mask_labels,
                 indices=indices,
                 num_masks=num_instances,
-            )
         )
-        losses.update(
-            self.loss_labels(
+        loss_labels = self.loss_labels(
                 class_queries_logits=class_queries_logits,
                 class_labels=class_labels,
                 indices=indices,
             )
-        )
-
-        if has_boxes:
-            losses.update(
-                self.loss_boxes(
+        loss_boxes = self.loss_boxes(
                     bbox_queries_preds=bbox_queries_preds,
                     box_labels=box_labels,
                     indices=indices,
                     num_instances=num_instances,
-                )
-            )
+        )
+        losses.update(loss_masks)
+        losses.update(loss_labels)
+        if has_boxes:
+            losses.update(loss_boxes)
 
+        for key, value in losses.items():
+            if not torch.isfinite(value):
+                losses[key] = torch.tensor(0.0, device=device, dtype=dtype)
+                                
         return losses
 
     def loss_boxes(
