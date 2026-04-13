@@ -1,1 +1,1 @@
-from .eomt_dinov3 import EoMT
+from .eomt import EoMT
