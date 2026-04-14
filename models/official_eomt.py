@@ -404,6 +404,7 @@ if __name__ == "__main__":
 
     from models.eomt import freeze_module_as_buffers
     from models.original_eomt import EoMT as BboxEoMT
+    from torch.nn.attention import SDPBackend, sdpa_kernel
     model_bbox = BboxEoMT(
         encoder=ViT(
             img_size=TARGET_SIZE,
@@ -412,8 +413,15 @@ if __name__ == "__main__":
         num_classes=80,
         num_q=200,
     )
-    model_bbox.load_state_dict(model.state_dict())    
-    freeze_module_as_buffers(model_bbox)
+    model_bbox.load_state_dict(model.state_dict())
     model_bbox.init_bbox_head()
-    model_bbox.eval().to(DEVICE)
-    _,_,bbox_logits_per_layer = model_bbox(x)
+    model_bbox.eval().to(DEVICE).to(dtype=torch.float16)
+
+    freeze_module_as_buffers(model_bbox)
+    model_bbox.eval().to(DEVICE).to(dtype=torch.float16)
+    assert model.encoder.backbone.blocks[0].attention.config._attn_implementation=="sdpa", "need torch sdpa kernel"
+    with sdpa_kernel(
+        [SDPBackend.CUDNN_ATTENTION, SDPBackend.FLASH_ATTENTION],
+        set_priority=True,
+    ):
+        _,_,bbox_logits_per_layer = model_bbox(x.to(dtype=torch.float16))

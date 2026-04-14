@@ -6,6 +6,7 @@ import warnings
 from pathlib import Path
 
 import torch
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -290,6 +291,13 @@ def build_model(args: argparse.Namespace):
         from models.original_eomt import EoMT as BboxEoMT
         from models.vit import ViT
 
+        if "bf16" in args.precision:
+            dtype = torch.bfloat16
+        elif "fp16" in args.precision:
+            dtype = torch.float16
+        else:
+            dtype = torch.float32
+
         network = BboxEoMT(
             encoder=ViT(
                 img_size=args.img_size,
@@ -303,6 +311,7 @@ def build_model(args: argparse.Namespace):
         load_official_dinov3_delta(network, str(args.official_delta_ckpt))
         freeze_module_as_buffers(network)
         network.init_bbox_head()
+        network = network.to(dtype=dtype)
         delta_weights = False
     else:
         from models.eomt import EoMT
@@ -472,20 +481,21 @@ def main(argv: list[str] | None = None) -> int:
     try:
         for epoch in range(start_epoch, args.max_epochs):
             model.current_epoch = epoch
-
-            train_one_epoch(
-                model=model,
-                train_loader=train_loader,
-                optimizer=optimizer,
-                scheduler=scheduler,
-                scaler=scaler,
-                device=device,
-                amp_enabled=amp_enabled,
-                amp_dtype=amp_dtype,
-                logger=logger,
-                epoch=epoch,
-                log_every_n_steps=args.log_every_n_steps,
-            )
+            
+            with sdpa_kernel(SDPBackend.CUDNN_ATTENTION):
+                train_one_epoch(
+                    model=model,
+                    train_loader=train_loader,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    scaler=scaler,
+                    device=device,
+                    amp_enabled=amp_enabled,
+                    amp_dtype=amp_dtype,
+                    logger=logger,
+                    epoch=epoch,
+                    log_every_n_steps=args.log_every_n_steps,
+                )
 
             should_validate = (
                 (epoch + 1) % args.check_val_every_n_epoch == 0
