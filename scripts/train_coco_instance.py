@@ -40,6 +40,10 @@ def _default_encoder_weights() -> Path:
     ).resolve()
 
 
+def _default_official_delta_ckpt() -> Path:
+    return (REPO_ROOT / "data/EoMT-L_640×640_InstanceSegmentation_DINOv3.bin").resolve()
+
+
 def _parse_devices(value: str):
     return int(value) if value.isdigit() else value
 
@@ -55,12 +59,20 @@ def _default_precision(accelerator: str) -> str:
 def _validate_paths(args: argparse.Namespace) -> None:
     if not args.data_path.exists():
         raise FileNotFoundError(f"Dataset directory does not exist: {args.data_path}")
-    if not args.encoder_repo.exists():
-        raise FileNotFoundError(f"DINOv3 repo path does not exist: {args.encoder_repo}")
-    if not args.encoder_weights.exists():
-        raise FileNotFoundError(
-            f"DINOv3 checkpoint does not exist: {args.encoder_weights}"
-        )
+    if args.network_impl == "dinov3":
+        if not args.encoder_repo.exists():
+            raise FileNotFoundError(f"DINOv3 repo path does not exist: {args.encoder_repo}")
+        if not args.encoder_weights.exists():
+            raise FileNotFoundError(
+                f"DINOv3 checkpoint does not exist: {args.encoder_weights}"
+            )
+    elif args.network_impl == "original_bbox":
+        if not args.official_delta_ckpt.exists():
+            raise FileNotFoundError(
+                f"Official EoMT delta checkpoint does not exist: {args.official_delta_ckpt}"
+            )
+    else:
+        raise ValueError(f"Unsupported --network-impl value: {args.network_impl}")
     if args.ckpt_path is not None and not args.ckpt_path.exists():
         raise FileNotFoundError(f"Model checkpoint does not exist: {args.ckpt_path}")
     if (
@@ -93,12 +105,26 @@ def build_parser() -> argparse.ArgumentParser:
         default="coco_instance_eomt_large_640_dinov3",
     )
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--network-impl",
+        choices=("dinov3", "original_bbox"),
+        default="dinov3",
+    )
     parser.add_argument("--encoder-repo", type=Path, default=_default_encoder_repo())
     parser.add_argument("--encoder-model", default="dinov3_vits16")
     parser.add_argument(
         "--encoder-weights",
         type=Path,
         default=_default_encoder_weights(),
+    )
+    parser.add_argument(
+        "--official-backbone-name",
+        default="facebook/dinov3-vitl16-pretrain-lvd1689m",
+    )
+    parser.add_argument(
+        "--official-delta-ckpt",
+        type=Path,
+        default=_default_official_delta_ckpt(),
     )
     parser.add_argument("--num-q", type=int, default=200)
     parser.add_argument("--num-blocks", type=int, default=4)
@@ -216,6 +242,7 @@ def parse_args(
     args.cache_dir = args.cache_dir.resolve()
     args.encoder_repo = args.encoder_repo.resolve()
     args.encoder_weights = args.encoder_weights.resolve()
+    args.official_delta_ckpt = args.official_delta_ckpt.resolve()
     if args.ckpt_path is not None:
         args.ckpt_path = args.ckpt_path.resolve()
     if args.resume_from_checkpoint is not None:
@@ -255,21 +282,45 @@ def build_data_module(args: argparse.Namespace):
 
 
 def build_model(args: argparse.Namespace):
-    from models.eomt import EoMT
     from training.instance_module import MaskClassificationInstance
 
-    network = EoMT(
-        encoder_weights=str(args.encoder_weights),
-        num_classes=args.num_classes,
-        num_q=args.num_q,
-        num_blocks=args.num_blocks,
-        masked_attn_enabled=args.masked_attn_enabled,
-        bbox_head_enabled=True,
-        encoder_repo=str(args.encoder_repo),
-        encoder_model=args.encoder_model,
-        fsrcnnx2=True,
-        precision=args.precision,
-    )
+    if args.network_impl == "original_bbox":
+        from models.eomt import freeze_module_as_buffers
+        from models.official_eomt import load_official_dinov3_delta
+        from models.original_eomt import EoMT as BboxEoMT
+        from models.vit import ViT
+
+        network = BboxEoMT(
+            encoder=ViT(
+                img_size=args.img_size,
+                backbone_name=args.official_backbone_name,
+            ),
+            num_classes=args.num_classes,
+            num_q=args.num_q,
+            num_blocks=args.num_blocks,
+            masked_attn_enabled=args.masked_attn_enabled,
+        )
+        load_official_dinov3_delta(network, str(args.official_delta_ckpt))
+        freeze_module_as_buffers(network)
+        network.init_bbox_head()
+        delta_weights = False
+    else:
+        from models.eomt import EoMT
+
+        network = EoMT(
+            encoder_weights=str(args.encoder_weights),
+            num_classes=args.num_classes,
+            num_q=args.num_q,
+            num_blocks=args.num_blocks,
+            masked_attn_enabled=args.masked_attn_enabled,
+            bbox_head_enabled=True,
+            encoder_repo=str(args.encoder_repo),
+            encoder_model=args.encoder_model,
+            fsrcnnx2=True,
+            precision=args.precision,
+        )
+        delta_weights = args.delta_weights
+
     return MaskClassificationInstance(
         network=network,
         img_size=args.img_size,
@@ -297,9 +348,46 @@ def build_model(args: argparse.Namespace):
         overlap_thresh=args.overlap_thresh,
         eval_top_k_instances=args.eval_top_k_instances,
         ckpt_path=str(args.ckpt_path) if args.ckpt_path is not None else None,
-        delta_weights=args.delta_weights,
+        delta_weights=delta_weights,
         load_ckpt_class_head=args.load_ckpt_class_head,
     )
+
+
+def _format_param_count(count: int) -> str:
+    return f"{count:,}"
+
+
+def print_model_details(model, args: argparse.Namespace, optimizer) -> None:
+    total_params = 0
+    trainable_params = 0
+    non_trainable_params = 0
+    trainable_tensors: list[tuple[str, int]] = []
+
+    for name, param in model.named_parameters():
+        numel = int(param.numel())
+        total_params += numel
+        if param.requires_grad:
+            trainable_params += numel
+            trainable_tensors.append((name, numel))
+        else:
+            non_trainable_params += numel
+
+    buffer_count = sum(int(buf.numel()) for buf in model.buffers())
+
+    print("Model details:")
+    print(f"  network_impl: {args.network_impl}")
+    print(f"  total_params: {_format_param_count(total_params)}")
+    print(f"  trainable_params: {_format_param_count(trainable_params)}")
+    print(f"  non_trainable_params: {_format_param_count(non_trainable_params)}")
+    print(f"  buffers: {_format_param_count(buffer_count)}")
+    print(f"  optimizer_param_groups: {len(optimizer.param_groups)}")
+
+    if trainable_tensors:
+        print("  trainable_tensors:")
+        for name, numel in trainable_tensors:
+            print(f"    - {name}: {_format_param_count(numel)}")
+    else:
+        print("  trainable_tensors: none")
 
 
 def configure_runtime() -> None:
@@ -360,6 +448,7 @@ def main(argv: list[str] | None = None) -> int:
     optim_config = model.configure_optimizers()
     optimizer = optim_config["optimizer"]
     scheduler = optim_config["lr_scheduler"]["scheduler"]
+    print_model_details(model, args, optimizer)
 
     start_epoch = 0
     best_val_ap_all = float("-inf")

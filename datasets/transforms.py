@@ -4,7 +4,7 @@ from typing import Any
 
 import torch
 from torch import Tensor, nn
-from torchvision.transforms import v2 as T
+from torchvision.transforms import v2 as T, InterpolationMode
 from torchvision.tv_tensors import TVTensor, wrap
 
 
@@ -206,3 +206,90 @@ class Transforms(nn.Module):
                 return out_img, out_target
 
         return last_img, last_target
+
+
+class Transforms(nn.Module):
+    def __init__(
+        self,
+        img_size: int | tuple[int, int],
+        fill: int | float = 0,
+        
+        # never use
+        color_jitter_enabled=None,
+        scale_range=None,
+    ) -> None:
+        super().__init__()
+        self.img_size = (img_size, img_size) if isinstance(img_size, int) else img_size
+        self.fill = fill
+
+    def forward(
+        self,
+        img: Tensor,
+        target: dict[str, Any],
+    ) -> tuple[Tensor, dict[str, Any]]:
+        target = target.copy()
+
+        h, w = img.shape[-2:]
+
+        if h != w:
+            side = max(h, w)
+            pad_w = side - w
+            pad_h = side - h
+
+            left = int(torch.randint(0, pad_w + 1, ()).item()) if pad_w > 0 else 0
+            top = int(torch.randint(0, pad_h + 1, ()).item()) if pad_h > 0 else 0
+            right = pad_w - left
+            bottom = pad_h - top
+
+            img = T.functional.pad(img, padding=[left, top, right, bottom], fill=self.fill)
+
+            boxes = target.get("boxes")
+            if boxes is not None and torch.is_tensor(boxes):
+                new_boxes = boxes.clone()
+                new_boxes[..., 0::2] += left
+                new_boxes[..., 1::2] += top
+                if isinstance(boxes, TVTensor):
+                    new_boxes = wrap(new_boxes, like=boxes, canvas_size=(side, side))
+                target["boxes"] = new_boxes
+
+            masks = target.get("masks")
+            if masks is not None and torch.is_tensor(masks):
+                target["masks"] = T.functional.pad(
+                    masks, padding=[left, top, right, bottom], fill=0
+                )
+
+            src_h, src_w = side, side
+        else:
+            src_h, src_w = h, w
+
+        scale_x = self.img_size[1] / src_w
+        scale_y = self.img_size[0] / src_h
+
+        img = T.functional.resize(
+            img,
+            size=self.img_size,
+            interpolation=InterpolationMode.BILINEAR,
+            antialias=True,
+        )
+
+        boxes = target.get("boxes")
+        if boxes is not None and torch.is_tensor(boxes):
+            new_boxes = boxes.clone()
+            new_boxes[..., 0::2] *= scale_x
+            new_boxes[..., 1::2] *= scale_y
+            if isinstance(boxes, TVTensor):
+                new_boxes = wrap(new_boxes, like=boxes, canvas_size=self.img_size)
+            target["boxes"] = new_boxes
+
+        masks = target.get("masks")
+        if masks is not None and torch.is_tensor(masks):
+            target["masks"] = T.functional.resize(
+                masks,
+                size=self.img_size,
+                interpolation=InterpolationMode.NEAREST,
+            )
+
+        if "area" in target and torch.is_tensor(target["area"]):
+            target["area"] = target["area"] * (scale_x * scale_y)
+
+        return img, target

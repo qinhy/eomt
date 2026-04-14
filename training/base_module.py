@@ -207,6 +207,8 @@ class TrainModule(nn.Module):
             assert imgs2.dtype == torch.uint8, "input image should be raw uint8 images"
             x2 = imgs2 / 255.0
 
+        if x2 is None:
+            return self.network.forward(x)
         return self.network.forward(x, x2)
 
     def training_step(self, batch, batch_idx):
@@ -475,4 +477,3 @@ class TrainModule(nn.Module):
             ]
             if unexpected_keys:
                 raise ValueError(f"Unexpected keys: {unexpected_keys}")
-

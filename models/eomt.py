@@ -90,9 +90,10 @@ class MaskResidualBoxHead(nn.Module):
         self.net = nn.Sequential(
             nn.Conv2d(3, 8, 3, padding=1), nn.GELU(),
             nn.Conv2d(8, 16, 3, padding=1), nn.GELU(),
+            nn.Conv2d(16, 32, 3, padding=1), nn.GELU(),
             nn.AdaptiveAvgPool2d(2),
             nn.Flatten(),
-            nn.Linear(16 * 2 * 2, hidden), nn.GELU(),
+            nn.Linear(32 * 2 * 2, hidden), nn.GELU(),
             nn.Linear(hidden, 4),
         )
         self._coord_cache = {}

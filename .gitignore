@@ -183,3 +183,4 @@ cython_debug/
 train.bat
 .codex
 /dataset_cache
+data/EoMT-L_640×640_InstanceSegmentation_DINOv3.bin
