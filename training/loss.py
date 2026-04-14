@@ -19,6 +19,7 @@ from torchvision import tv_tensors
 from torchvision.ops import box_convert, generalized_box_iou, generalized_box_iou_loss
 
 from transformers.models.mask2former.modeling_mask2former import (
+    Mask2FormerHungarianMatcher,
     Mask2FormerLoss,
     pair_wise_dice_loss,
     pair_wise_sigmoid_cross_entropy_loss,
@@ -226,13 +227,20 @@ class MaskClassificationLoss(Mask2FormerLoss):
         empty_weight[-1] = self.eos_coef
         self.register_buffer("empty_weight", empty_weight)
 
-        self.matcher = BoxAwareMask2FormerHungarianMatcher(
+        # self.matcher = BoxAwareMask2FormerHungarianMatcher(
+        #     num_points=num_points,
+        #     cost_mask=mask_coefficient,
+        #     cost_dice=dice_coefficient,
+        #     cost_class=class_coefficient,
+        #     cost_bbox=bbox_l1_coefficient,
+        #     cost_giou=bbox_giou_coefficient,
+        # )
+
+        self.matcher = Mask2FormerHungarianMatcher(
             num_points=num_points,
             cost_mask=mask_coefficient,
             cost_dice=dice_coefficient,
             cost_class=class_coefficient,
-            cost_bbox=bbox_l1_coefficient,
-            cost_giou=bbox_giou_coefficient,
         )
 
     def get_num_instances(self, class_labels: List[torch.Tensor], device: torch.device) -> torch.Tensor:
@@ -300,11 +308,11 @@ class MaskClassificationLoss(Mask2FormerLoss):
 
         indices = self.matcher.forward(
             masks_queries_logits=masks_queries_logits,
-            class_queries_logits=class_queries_logits,
             mask_labels=mask_labels,
+            class_queries_logits=class_queries_logits,
             class_labels=class_labels,
-            bbox_queries_preds=bbox_queries_preds if has_boxes else None,
-            box_labels=box_labels,
+            # bbox_queries_preds=bbox_queries_preds if has_boxes else None,
+            # box_labels=box_labels,
         )
 
         num_instances = self.get_num_instances(class_labels, device=device)
