@@ -352,9 +352,8 @@ class EoMT(nn.Module):
         
         bbox_preds = None
         if self.bbox_head_enabled:
-            bbox_logits = output_logits[:, :, -4 :]
-            bbox_logits = bbox_logits + self.bbox_res(mask_logits)
-            bbox_preds = bbox_logits.sigmoid() # normalized cxcywh in [0,1].
+            bbox_preds = output_logits[:, :, -4 :].sigmoid() # normalized cxcywh in [0,1].
+            bbox_preds = bbox_preds + self.bbox_res(mask_logits) # normalized cxcywh in [0,1].
         return mask_logits, class_logits, bbox_preds
 
     def forward_dinov3_phase1(self, x: torch.Tensor):
