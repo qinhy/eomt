@@ -12,6 +12,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
     
+from scripts.utils import summ
 from training.checkpointing import (
     load_training_state,
     resolve_run_dir,
@@ -37,7 +38,7 @@ def _default_encoder_repo() -> Path:
 
 def _default_encoder_weights() -> Path:
     return (
-        REPO_ROOT / "../BitNetCNN/data/dinov3_vits16_pretrain_lvd1689m-08c60483.pth"
+        REPO_ROOT / "./data/dinov3_vits16_pretrain_lvd1689m-08c60483.pth"
     ).resolve()
 
 
@@ -293,11 +294,6 @@ def build_model(args: argparse.Namespace):
 
         if "bf16" in args.precision:
             dtype = torch.bfloat16
-        elif "fp16" in args.precision:
-            dtype = torch.float16
-        else:
-            dtype = torch.float32
-
         network = BboxEoMT(
             encoder=ViT(
                 img_size=args.img_size,
@@ -306,12 +302,11 @@ def build_model(args: argparse.Namespace):
             num_classes=args.num_classes,
             num_q=args.num_q,
             num_blocks=args.num_blocks,
-            masked_attn_enabled=args.masked_attn_enabled,
+            masked_attn_enabled=args.masked_attn_enabled
         )
         load_official_dinov3_delta(network, str(args.official_delta_ckpt))
         freeze_module_as_buffers(network)
         network.init_bbox_head()
-        network = network.to(dtype=dtype)
         delta_weights = False
     else:
         from models.eomt import EoMT
@@ -445,7 +440,14 @@ def main(argv: list[str] | None = None) -> int:
     train_loader = datamodule.train_dataloader()
     val_loader = datamodule.val_dataloader()
 
-    model = build_model(args)
+    if "bf16" in args.precision:
+        dtype = torch.bfloat16
+    elif "fp16" in args.precision:
+        dtype = torch.float16
+    else:
+        dtype = torch.float32
+
+    model = build_model(args).to(dtype=dtype)
     model.max_epochs = args.max_epochs
     model.to(device)
     model.logger = argparse.Namespace(log_dir=str(run_dir))
@@ -483,19 +485,20 @@ def main(argv: list[str] | None = None) -> int:
             model.current_epoch = epoch
             
             with sdpa_kernel(SDPBackend.CUDNN_ATTENTION):
-                train_one_epoch(
-                    model=model,
-                    train_loader=train_loader,
-                    optimizer=optimizer,
-                    scheduler=scheduler,
-                    scaler=scaler,
-                    device=device,
-                    amp_enabled=amp_enabled,
-                    amp_dtype=amp_dtype,
-                    logger=logger,
-                    epoch=epoch,
-                    log_every_n_steps=args.log_every_n_steps,
-                )
+                with torch.amp.autocast('cuda', dtype=torch.float16):
+                    train_one_epoch(
+                        model=model,
+                        train_loader=train_loader,
+                        optimizer=optimizer,
+                        scheduler=scheduler,
+                        scaler=scaler,
+                        device=device,
+                        amp_enabled=amp_enabled,
+                        amp_dtype=amp_dtype,
+                        logger=logger,
+                        epoch=epoch,
+                        log_every_n_steps=args.log_every_n_steps,
+                    )
 
             should_validate = (
                 (epoch + 1) % args.check_val_every_n_epoch == 0

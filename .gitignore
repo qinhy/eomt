@@ -184,3 +184,7 @@ train.bat
 .codex
 /dataset_cache
 data/EoMT-L_640×640_InstanceSegmentation_DINOv3.bin
+data/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth
+data/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth
+data/dinov3_vits16_pretrain_lvd1689m-08c60483.pth
+train.sh

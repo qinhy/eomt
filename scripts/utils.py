@@ -108,3 +108,36 @@ def save_mask_with_box(
     plt.tight_layout()
     plt.savefig(save_path, bbox_inches="tight", pad_inches=0)
     plt.close(fig)
+
+def summ(model, verbose=True, include_buffers=True):
+    info = []
+    for name, module in model.named_modules():
+        # parameters for this module only (no children)
+        params = list(module.parameters(recurse=False))
+        nparams = sum(p.numel() for p in params)
+
+        # collect dtypes from params (and optionally buffers)
+        tensors = params
+        if include_buffers:
+            tensors += list(module.buffers(recurse=False))
+
+        dtypes = {t.dtype for t in tensors}
+        if dtypes:
+            # e.g. "float32", "float16, int8"
+            dtype_str = ", ".join(
+                sorted(str(dt).replace("torch.", "") for dt in dtypes)
+            )
+        else:
+            dtype_str = "-" + " "*14
+
+        out_chs = ""
+        if hasattr(module,'out_channels'):
+            out_chs = f"out_channels={module.out_channels}"
+            
+        row = (name, module.__class__.__name__, nparams, dtype_str)
+        info.append(row)
+
+        if verbose:
+            print(f"{name:35} {module.__class__.__name__:25} "
+                  f"params={nparams:8d}  dtypes={dtype_str:15} {out_chs}")
+    return info
