@@ -53,25 +53,23 @@ EoMT with DINOv2 is also available on [Hugging Face Transformers](https://huggin
 
 ## Installation
 
-If you don't have Conda installed, install Miniconda and restart your shell:
+Install `uv` if it is not already available:
 
 ```bash
-wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
-bash Miniconda3-latest-Linux-x86_64.sh
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-Then create the environment, activate it, and install the dependencies:
+Then create the project environment and install the dependencies:
 
 ```bash
-conda create -n eomt python==3.13.2
-conda activate eomt
-python3 -m pip install -r requirements.txt
+uv python install 3.12
+uv sync
 ```
 
 [Weights & Biases](https://wandb.ai/) (wandb) is used for experiment logging and visualization. To enable wandb, log in to your account:
 
 ```bash
-wandb login
+uv run wandb login
 ```
 
 ## Data preparation
@@ -115,7 +113,7 @@ wget --load-cookies cookies.txt --content-disposition https://www.cityscapes-dat
 To train EoMT from scratch, run:
 
 ```bash
-python3 main.py fit \
+uv run python main.py fit \
   -c configs/dinov2/coco/panoptic/eomt_large_640.yaml \
   --trainer.devices 4 \
   --data.batch_size 4 \
@@ -146,7 +144,7 @@ To fine-tune a pre-trained EoMT model, add:
 To evaluate a pre-trained EoMT model, run:
 
 ```bash
-python3 main.py validate \
+uv run python main.py validate \
   -c configs/dinov2/coco/panoptic/eomt_large_640.yaml \
   --model.network.masked_attn_enabled False \
   --trainer.devices 4 \
