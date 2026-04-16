@@ -73,6 +73,33 @@ def token2map(x: torch.Tensor, grid_size):
     assert N == gh * gw, f"Token count {N} does not match grid {gh}x{gw}"
     return x.transpose(1, 2).reshape(B, D, gh, gw)
 
+def masks_to_boxes_cxcywh(mask_logits: torch.Tensor):
+    B, Q, H, W = mask_logits.shape
+    N = B * Q
+    with torch.no_grad():
+        masks = mask_logits.reshape(N, H, W) > 0.0
+        empty_mask = ~masks.flatten(1).any(dim=1)
+        base_boxes = torch.zeros(
+            (N, 4),
+            device=mask_logits.device,
+            dtype=mask_logits.dtype,
+        )
+        if (~empty_mask).any():
+            non_empty_boxes = masks_to_boxes(masks[~empty_mask])
+            base_boxes[~empty_mask] = non_empty_boxes.to(
+                mask_logits.device,
+                mask_logits.dtype,
+            )
+        base_boxes[:, [0, 2]] /= max(W - 1, 1)
+        base_boxes[:, [1, 3]] /= max(H - 1, 1)
+        boxes_cxcywh = box_convert(
+            base_boxes,
+            in_fmt="xyxy",
+            out_fmt="cxcywh",
+        ).clamp(0, 1)
+        return boxes_cxcywh.reshape(B, Q, 4)
+
+
 class RandomResizeToMultipleOf16:
     def __init__(self, scale=(0.5, 1.0), patch_size=16):
         self.scale = scale
@@ -123,31 +150,7 @@ class MaskResidualBoxHead(nn.Module):
         N = B * Q
 
         if boxes_cxcywh is None:
-            with torch.no_grad():
-                masks = mask_logits.reshape(N, H, W) > 0.0
-                empty_mask = ~masks.flatten(1).any(dim=1)
-
-                base_boxes = torch.zeros(
-                    (N, 4),
-                    device=mask_logits.device,
-                    dtype=mask_logits.dtype,
-                )
-
-                if (~empty_mask).any():
-                    non_empty_boxes = masks_to_boxes(masks[~empty_mask])
-                    base_boxes[~empty_mask] = non_empty_boxes.to(
-                        mask_logits.device,
-                        mask_logits.dtype,
-                    )
-
-                base_boxes[:, [0, 2]] /= max(W - 1, 1)
-                base_boxes[:, [1, 3]] /= max(H - 1, 1)
-                boxes_cxcywh = box_convert(
-                    base_boxes,
-                    in_fmt="xyxy",
-                    out_fmt="cxcywh",
-                ).clamp(0, 1)
-                
+            boxes_cxcywh = masks_to_boxes_cxcywh(mask_logits)                
         else:
             boxes_cxcywh = boxes_cxcywh.reshape(N, 4).to(mask_logits.device, mask_logits.dtype)
 
@@ -229,7 +232,7 @@ class EoMT(nn.Module):
         if self.bbox_head_enabled:
         # bbox head 
             DD += 4
-            self.bbox_res = MaskResidualBoxHead().to(dtype=dtype)
+            self.bbox_res = masks_to_boxes_cxcywh#MaskResidualBoxHead().to(dtype=dtype)
         self.output_head = nn.Sequential(
             nn.Linear(D, DD),  nn.GELU(),
             nn.Linear(DD, DD), nn.GELU(),
@@ -252,8 +255,6 @@ class EoMT(nn.Module):
 
         self.register_buffer("pixel_mean", pixel_mean)
         self.register_buffer("pixel_std", pixel_std)
-
-        self.masked_attn_enabled = False
 
     def _normalize_image(self, x: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
         if x is None:
@@ -353,7 +354,7 @@ class EoMT(nn.Module):
         bbox_preds = None
         if self.bbox_head_enabled:
             bbox_preds = output_logits[:, :, -4 :].sigmoid() # normalized cxcywh in [0,1].
-            bbox_preds = bbox_preds + self.bbox_res(mask_logits) # normalized cxcywh in [0,1].
+            bbox_preds = bbox_preds*0.1 + self.bbox_res(mask_logits) # normalized cxcywh in [0,1].
         return mask_logits, class_logits, bbox_preds
 
     def forward_dinov3_phase1(self, x: torch.Tensor):

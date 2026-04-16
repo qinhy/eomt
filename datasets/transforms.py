@@ -230,6 +230,22 @@ class Transforms(nn.Module):
         target = target.copy()
 
         h, w = img.shape[-2:]
+        pad_w = (-w) % 16
+        pad_h = (-h) % 16
+
+        if pad_w or pad_h:
+            img = T.functional.pad(img, padding=[0, 0, pad_w, pad_h], fill=self.fill)
+
+            masks = target.get("masks")
+            if masks is not None and torch.is_tensor(masks):
+                new_masks = T.functional.pad(masks, padding=[0, 0, pad_w, pad_h], fill=0)
+                if isinstance(masks, TVTensor):
+                    new_masks = wrap(new_masks, like=masks, canvas_size=(h + pad_h, w + pad_w))
+                target["masks"] = new_masks
+
+            boxes = target.get("boxes")
+            if boxes is not None and isinstance(boxes, TVTensor):
+                target["boxes"] = wrap(boxes, like=boxes, canvas_size=(h + pad_h, w + pad_w))
 
         if h != w:
             side = max(h, w)
