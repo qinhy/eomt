@@ -10,9 +10,9 @@ class EoMT(EoMT):
         self.bbox_head = MaskResidualBoxHead()
 
     def _predict_bbox(self, mask_logits: torch.Tensor):
-        bbox_logits = self.bbox_head(mask_logits)
-        bbox_preds = bbox_logits.sigmoid() # normalized cxcywh in [0,1].
-        return bbox_preds
+        return self.bbox_head(mask_logits)
+        # bbox_preds = bbox_logits.sigmoid() # normalized cxcywh in [0,1].
+        # return bbox_preds
     
     def forward(self, x: torch.Tensor):
         x = (x - self.encoder.pixel_mean) / self.encoder.pixel_std
@@ -30,7 +30,7 @@ class EoMT(EoMT):
         mask_logits_per_layer, class_logits_per_layer = [], []
 
         bbox_head_enabled = hasattr(self, "bbox_head")
-        if bbox_head_enabled:bbox_logits_per_layer = []
+        if bbox_head_enabled:bbox_preds_per_layer = []
 
         for i, block in enumerate(self.encoder.backbone.blocks):
             if i == len(self.encoder.backbone.blocks) - self.num_blocks:
@@ -46,8 +46,8 @@ class EoMT(EoMT):
                 mask_logits_per_layer.append(mask_logits)
                 class_logits_per_layer.append(class_logits)
                 if bbox_head_enabled:
-                    bbox_logits = self._predict_bbox(mask_logits)
-                    bbox_logits_per_layer.append(bbox_logits)
+                    bbox_preds = self._predict_bbox(mask_logits)
+                    bbox_preds_per_layer.append(bbox_preds)
 
                 attn_mask = self._attn_mask(x, mask_logits, i)
 
@@ -72,12 +72,12 @@ class EoMT(EoMT):
         class_logits_per_layer.append(class_logits)
 
         if bbox_head_enabled:
-            bbox_logits = self._predict_bbox(mask_logits)
-            bbox_logits_per_layer.append(bbox_logits)
+            bbox_preds = self._predict_bbox(mask_logits)
+            bbox_preds_per_layer.append(bbox_preds)
             return (
                 mask_logits_per_layer,
                 class_logits_per_layer,
-                bbox_logits_per_layer,
+                bbox_preds_per_layer,
             )
 
         return (

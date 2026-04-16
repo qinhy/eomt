@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
+from torchvision.ops import box_convert, masks_to_boxes
 
 from dinov3.layers.block import SelfAttentionBlock
 from dinov3.models.vision_transformer import DinoVisionTransformer
@@ -85,17 +86,24 @@ class RandomResizeToMultipleOf16:
         return torchvision.transforms.functional.resize(img, [new_h, new_w])
     
 class MaskResidualBoxHead(nn.Module):
-    def __init__(self, hidden=64):
+    def __init__(self, hidden=64, delta_scale=0.1):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Conv2d(3, 8, 3, padding=1), nn.GELU(),
-            nn.Conv2d(8, 16, 3, padding=1), nn.GELU(),
-            nn.Conv2d(16, 32, 3, padding=1), nn.GELU(),
+            nn.Conv2d(3, 16, 3, padding=1),
+            nn.GroupNorm(4, 16),
+            nn.GELU(),
+
+            nn.Conv2d(16, 32, 3, padding=1),
+            nn.GroupNorm(8, 32),
+            nn.GELU(),
+
             nn.AdaptiveAvgPool2d(2),
             nn.Flatten(),
-            nn.Linear(32 * 2 * 2, hidden), nn.GELU(),
+            nn.Linear(32 * 2 * 2, hidden),
+            nn.GELU(),
             nn.Linear(hidden, 4),
         )
+        self.delta_scale = delta_scale
         self._coord_cache = {}
 
     def get_coords(self, H, W, device, dtype, N):
@@ -104,19 +112,54 @@ class MaskResidualBoxHead(nn.Module):
             yy, xx = torch.meshgrid(
                 torch.linspace(-1, 1, H, device=device, dtype=dtype),
                 torch.linspace(-1, 1, W, device=device, dtype=dtype),
-                indexing="ij"
+                indexing="ij",
             )
-            coord = torch.stack([xx, yy], dim=0).unsqueeze(0)   # [1,2,H,W]
+            coord = torch.stack([xx, yy], dim=0).unsqueeze(0)  # [1, 2, H, W]
             self._coord_cache[key] = coord
         return self._coord_cache[key].expand(N, -1, -1, -1)
 
-    def forward(self, mask_logits):   # [B,Q,H,W]
+    def forward(self, mask_logits, boxes_cxcywh=None):
         B, Q, H, W = mask_logits.shape
-        x = mask_logits.reshape(B * Q, 1, H, W)
-        coord = self.get_coords(H, W, x.device, x.dtype, B * Q)
+        N = B * Q
+
+        if boxes_cxcywh is None:
+            with torch.no_grad():
+                masks = mask_logits.reshape(N, H, W) > 0.0
+                empty_mask = ~masks.flatten(1).any(dim=1)
+
+                base_boxes = torch.zeros(
+                    (N, 4),
+                    device=mask_logits.device,
+                    dtype=mask_logits.dtype,
+                )
+
+                if (~empty_mask).any():
+                    non_empty_boxes = masks_to_boxes(masks[~empty_mask])
+                    base_boxes[~empty_mask] = non_empty_boxes.to(
+                        mask_logits.device,
+                        mask_logits.dtype,
+                    )
+
+                base_boxes[:, [0, 2]] /= max(W - 1, 1)
+                base_boxes[:, [1, 3]] /= max(H - 1, 1)
+                boxes_cxcywh = box_convert(
+                    base_boxes,
+                    in_fmt="xyxy",
+                    out_fmt="cxcywh",
+                ).clamp(0, 1)
+                
+        else:
+            boxes_cxcywh = boxes_cxcywh.reshape(N, 4).to(mask_logits.device, mask_logits.dtype)
+
+        x = mask_logits.sigmoid().reshape(N, 1, H, W)
+        coord = self.get_coords(H, W, x.device, x.dtype, N)
         x = torch.cat([x, coord], dim=1)
-        x = self.net(x).reshape(B, Q, 4)
-        return x
+
+        # small bounded residual in normalized box space
+        delta = self.delta_scale * torch.tanh(self.net(x))
+
+        out_boxes_cxcywh = (boxes_cxcywh + delta).clamp(0.0, 1.0)
+        return out_boxes_cxcywh.reshape(B, Q, 4)
     
 class EoMT(nn.Module):
     class Index:
