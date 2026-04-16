@@ -291,9 +291,6 @@ def build_model(args: argparse.Namespace):
         from models.official_eomt import load_official_dinov3_delta
         from models.original_eomt import EoMT as BboxEoMT
         from models.vit import ViT
-
-        if "bf16" in args.precision:
-            dtype = torch.bfloat16
         network = BboxEoMT(
             encoder=ViT(
                 img_size=args.img_size,
