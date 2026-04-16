@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import warnings
 from pathlib import Path
@@ -69,10 +70,11 @@ def _validate_paths(args: argparse.Namespace) -> None:
                 f"DINOv3 checkpoint does not exist: {args.encoder_weights}"
             )
     elif args.network_impl == "original_bbox":
-        if not args.official_delta_ckpt.exists():
-            raise FileNotFoundError(
-                f"Official EoMT delta checkpoint does not exist: {args.official_delta_ckpt}"
-            )
+        # if not args.official_delta_ckpt.exists():
+        #     raise FileNotFoundError(
+        #         f"Official EoMT delta checkpoint does not exist: {args.official_delta_ckpt}"
+        #     )
+        pass
     else:
         raise ValueError(f"Unsupported --network-impl value: {args.network_impl}")
     if args.ckpt_path is not None and not args.ckpt_path.exists():
@@ -301,8 +303,11 @@ def build_model(args: argparse.Namespace):
             num_blocks=args.num_blocks,
             masked_attn_enabled=args.masked_attn_enabled
         )
-        load_official_dinov3_delta(network, str(args.official_delta_ckpt))
-        freeze_module_as_buffers(network)
+        if os.path.exists(args.official_delta_ckpt):
+            load_official_dinov3_delta(network, str(args.official_delta_ckpt))
+        else:
+            print(f"skip load_official_dinov3_delta of no exist {str(args.official_delta_ckpt)}")
+        # freeze_module_as_buffers(network)
         network.init_bbox_head()
         delta_weights = False
     else:
