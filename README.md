@@ -130,3 +130,30 @@ Basic smoke checks:
 python3 -m unittest discover -s tests
 python3 -m scripts.train_coco_instance --help
 ```
+
+
+## Original EoMT result
+```txt
+EoMT(Original):
+  trainable_tensors:
+    - network.encoder.cls_token: 1,024
+    - network.encoder.storage_tokens: 4,096
+    - network.encoder.mask_token: 1,024
+    - network.encoder.patch_embed.proj.weight: 786,432
+    - network.encoder.patch_embed.proj.bias: 1,024
+    - network.encoder.blocks.0.norm1.weight: 1,024
+    - network.encoder.blocks.0.norm1.bias: 1,024
+    ...encoder(dinov3) layers
+    - network.encoder.blocks.23.ls2.gamma: 1,024
+    - network.encoder.norm.weight: 1,024
+    - network.encoder.norm.bias: 1,024
+    
+    - network.q.weight: 204,800
+    - network.output_head.0.weight: 1,135,616
+    - network.output_head.0.bias: 1,109
+    - network.output_head.2.weight: 1,229,881
+    - network.output_head.2.bias: 1,109
+    - network.output_head.4.weight: 1,229,881
+    - network.output_head.4.bias: 1,109
+```
+![alt text](./docs/e1.png)
