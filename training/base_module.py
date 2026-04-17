@@ -90,11 +90,11 @@ class TrainModule(nn.Module):
                 }
             ckpt = self._load_ckpt(ckpt_path, load_ckpt_class_head)
             combined_state_dict = self._add_state_dicts(current_state_dict, ckpt)
-            incompatible_keys = self.load_state_dict(combined_state_dict, strict=False)
+            incompatible_keys = self.load_state_dict(combined_state_dict, strict=True)
             self._raise_on_incompatible(incompatible_keys, load_ckpt_class_head)
         elif ckpt_path:
             ckpt = self._load_ckpt(ckpt_path, load_ckpt_class_head)
-            incompatible_keys = self.load_state_dict(ckpt, strict=False)
+            incompatible_keys = self.load_state_dict(ckpt, strict=True)
             self._raise_on_incompatible(incompatible_keys, load_ckpt_class_head)
 
         self.log = compiler_disable(self.log)  # type: ignore[assignment]
