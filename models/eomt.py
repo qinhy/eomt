@@ -112,58 +112,6 @@ class RandomResizeToMultipleOf16:
         new_w = max(self.patch_size, round(w * s / self.patch_size) * self.patch_size)
         return torchvision.transforms.functional.resize(img, [new_h, new_w])
     
-class MaskResidualBoxHead(nn.Module):
-    def __init__(self, hidden=64, delta_scale=0.1):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv2d(3, 16, 3, padding=1),
-            nn.GroupNorm(4, 16),
-            nn.GELU(),
-
-            nn.Conv2d(16, 32, 3, padding=1),
-            nn.GroupNorm(8, 32),
-            nn.GELU(),
-
-            nn.AdaptiveAvgPool2d(2),
-            nn.Flatten(),
-            nn.Linear(32 * 2 * 2, hidden),
-            nn.GELU(),
-            nn.Linear(hidden, 4),
-        )
-        self.delta_scale = delta_scale
-        self._coord_cache = {}
-
-    def get_coords(self, H, W, device, dtype, N):
-        key = (H, W, device.type, device.index, str(dtype))
-        if key not in self._coord_cache:
-            yy, xx = torch.meshgrid(
-                torch.linspace(-1, 1, H, device=device, dtype=dtype),
-                torch.linspace(-1, 1, W, device=device, dtype=dtype),
-                indexing="ij",
-            )
-            coord = torch.stack([xx, yy], dim=0).unsqueeze(0)  # [1, 2, H, W]
-            self._coord_cache[key] = coord
-        return self._coord_cache[key].expand(N, -1, -1, -1)
-
-    def forward(self, mask_logits, boxes_cxcywh=None):
-        B, Q, H, W = mask_logits.shape
-        N = B * Q
-
-        if boxes_cxcywh is None:
-            boxes_cxcywh = masks_to_boxes_cxcywh(mask_logits)                
-        else:
-            boxes_cxcywh = boxes_cxcywh.reshape(N, 4).to(mask_logits.device, mask_logits.dtype)
-
-        x = mask_logits.sigmoid().reshape(N, 1, H, W)
-        coord = self.get_coords(H, W, x.device, x.dtype, N)
-        x = torch.cat([x, coord], dim=1)
-
-        # small bounded residual in normalized box space
-        delta = self.delta_scale * torch.tanh(self.net(x))
-
-        out_boxes_cxcywh = (boxes_cxcywh + delta).clamp(0.0, 1.0)
-        return out_boxes_cxcywh.reshape(B, Q, 4)
-    
 class EoMT(nn.Module):
     class Index:
         def __init__(self,num_q,num_backbone_prefix_tokens):
@@ -232,7 +180,7 @@ class EoMT(nn.Module):
         if self.bbox_head_enabled:
         # bbox head 
             DD += 4
-            self.bbox_res = masks_to_boxes_cxcywh#MaskResidualBoxHead().to(dtype=dtype)
+            self.bbox_res = masks_to_boxes_cxcywh
         self.output_head = nn.Sequential(
             nn.Linear(D, DD),  nn.GELU(),
             nn.Linear(DD, DD), nn.GELU(),
@@ -261,9 +209,6 @@ class EoMT(nn.Module):
             return None
         return (x - self.pixel_mean) / self.pixel_std
         
-    def freeze_encoder(self):
-        freeze_module_as_buffers(self.encoder)
-
     def _attn_mask(
         self,
         num_tokens: int,                     # total token count N from x: [B, N, D]
@@ -402,17 +347,18 @@ class EoMT(nn.Module):
 
                 if x2 is not None:
                     norm_x2 = backbone.norm(x2)
-                    
-                mask_logits, class_logits, bbox_preds = self._predict(
-                    query_tokens=norm_x[:,idx.query_start:idx.query_end],
-                    patch_tokens_map=token2map(norm_x[:,idx.patch_start:],grid_size),
-                    patch_tokens_map_x2=token2map(norm_x2[:,self.num_backbone_prefix_tokens:] if x2 is not None else None, grid_size_x2),
-                )
-                res.append((mask_logits, class_logits, bbox_preds))
 
-                attn_mask = self._attn_mask(N,mask_logits,
-                                            grid_size=grid_size,
-                                            late_block_idx=late_block_idx)
+                if self.training:
+                    mask_logits, class_logits, bbox_preds = self._predict(
+                        query_tokens=norm_x[:,idx.query_start:idx.query_end],
+                        patch_tokens_map=token2map(norm_x[:,idx.patch_start:],grid_size),
+                        patch_tokens_map_x2=token2map(norm_x2[:,self.num_backbone_prefix_tokens:] if x2 is not None else None, grid_size_x2),
+                    )
+                    res.append((mask_logits, class_logits, bbox_preds))
+
+                    attn_mask = self._attn_mask(N,mask_logits,
+                                                grid_size=grid_size,
+                                                late_block_idx=late_block_idx)
 
             layer_attn_mask = attn_mask
             if layer_attn_mask is not None:
