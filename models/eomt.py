@@ -334,17 +334,13 @@ class EoMT(nn.Module):
 
             owner_queries_logits = torch.cat([owner_fg_logits, owner_bg_logits], dim=1)
 
-            # fuse_owner_logits = self.fuse_owner_logits(mask_logits, owner_queries_logits, class_logits) # [B, Q, H, W]
-            # owner_probs = fuse_owner_logits.softmax(dim=0)                          # over query axis
-            # owner_id = owner_probs.argmax(dim=0)                                    # [B, H, W], Q = bg index
-
-            # binary_masks = F.one_hot(owner_id, num_classes=self.num_q)   # [B, H, W, Q]
-            # binary_masks = binary_masks.permute(0, 3, 1, 2).float()      # [B, Q, H, W]
+            binary_masks = self.fuse_owner_logits(mask_logits, owner_queries_logits, class_logits,
+                                                  output_one_hot=True) # [B, Q, H, W]
 
         bbox_preds = None
         if self.bbox_head_enabled:
             bbox_preds = output_logits[:, :, -4 :].sigmoid() # normalized cxcywh in [0,1].
-            bbox_preds = bbox_preds*0.1 + self.bbox_res(mask_logits) # normalized cxcywh in [0,1].
+            bbox_preds = bbox_preds*0.1 + self.bbox_res(binary_masks[:,:self.num_q]) # normalized cxcywh in [0,1].
         return mask_logits, class_logits, bbox_preds, owner_queries_logits
 
     def forward_dinov3_phase1(self, x: torch.Tensor):
@@ -477,6 +473,7 @@ class EoMT(nn.Module):
         class_logits: torch.Tensor,            # [B, Q, C+1]
         score_thresh: Optional[float] = None,
         fusion_alpha: Optional[float] = None,
+        output_one_hot: bool = False,
     ) -> torch.Tensor:
         """
         Hybrid inference:
@@ -503,7 +500,13 @@ class EoMT(nn.Module):
 
         # shape prior from old mask head
         if fusion_alpha != 0.0:
-            fused[:, :Q] = fused[:, :Q] + fusion_alpha * F.logsigmoid(mask_logits)
+            fused[:, :Q] = fused[:, :Q] + fusion_alpha * F.logsigmoid(mask_logits) # [B, Q, H, W]
+
+        if output_one_hot:
+            # fused_probs = fused.softmax(dim=1)
+            owner_id = fused.argmax(dim=1) # [B, H, W]
+            fused = F.one_hot(owner_id, num_classes=self.num_q+1) # [B, H, W, Q+1]
+            fused = fused.permute(0, 3, 1, 2).float() # [B, Q+1, H, W]
 
         return fused
 
