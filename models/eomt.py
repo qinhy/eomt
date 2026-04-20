@@ -334,6 +334,13 @@ class EoMT(nn.Module):
 
             owner_queries_logits = torch.cat([owner_fg_logits, owner_bg_logits], dim=1)
 
+            # fuse_owner_logits = self.fuse_owner_logits(mask_logits, owner_queries_logits, class_logits) # [B, Q, H, W]
+            # owner_probs = fuse_owner_logits.softmax(dim=0)                          # over query axis
+            # owner_id = owner_probs.argmax(dim=0)                                    # [B, H, W], Q = bg index
+
+            # binary_masks = F.one_hot(owner_id, num_classes=self.num_q)   # [B, H, W, Q]
+            # binary_masks = binary_masks.permute(0, 3, 1, 2).float()      # [B, Q, H, W]
+
         bbox_preds = None
         if self.bbox_head_enabled:
             bbox_preds = output_logits[:, :, -4 :].sigmoid() # normalized cxcywh in [0,1].
