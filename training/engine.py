@@ -118,6 +118,7 @@ def train_one_epoch(
                     "cls",
                     "bbox",
                     "giou",
+                    "owner",
                     "lr/max",
                 ],
             )

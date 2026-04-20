@@ -148,6 +148,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--class-coefficient", type=float, default=2.0)
     parser.add_argument("--bbox-l1-coefficient", type=float, default=5.0)
     parser.add_argument("--bbox-giou-coefficient", type=float, default=2.0)
+    parser.add_argument("--owner-coefficient", type=float, default=1.0)
     parser.add_argument("--mask-thresh", type=float, default=0.8)
     parser.add_argument("--overlap-thresh", type=float, default=0.8)
     parser.add_argument("--eval-top-k-instances", type=int, default=100)
@@ -350,6 +351,7 @@ def build_model(args: argparse.Namespace):
         class_coefficient=args.class_coefficient,
         bbox_l1_coefficient=args.bbox_l1_coefficient,
         bbox_giou_coefficient=args.bbox_giou_coefficient,
+        owner_coefficient=args.owner_coefficient,
         mask_thresh=args.mask_thresh,
         overlap_thresh=args.overlap_thresh,
         eval_top_k_instances=args.eval_top_k_instances,

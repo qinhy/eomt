@@ -213,16 +213,17 @@ class TrainModule(nn.Module):
 
     def training_step(self, batch, batch_idx):
         imgs, targets = batch
-        mask_logits_per_block, class_logits_per_block, bbox_preds_per_block = self(imgs)
+        mask_logits_per_block, class_logits_per_block, bbox_preds_per_block, owner_logits_per_layer = self(imgs)
 
         losses_all_blocks = {}
-        for i, (mask_logits, class_logits, bbox_preds) in enumerate(
-            zip(mask_logits_per_block, class_logits_per_block, bbox_preds_per_block)
+        for i, (mask_logits, class_logits, bbox_preds, owner_logits) in enumerate(
+            zip(mask_logits_per_block, class_logits_per_block, bbox_preds_per_block, owner_logits_per_layer)
         ):
             losses = self.criterion(
                 masks_queries_logits=mask_logits,
                 class_queries_logits=class_logits,
                 bbox_queries_preds=bbox_preds,
+                owner_queries_logits=owner_logits,
                 targets=targets,
             )
             block_postfix = self.block_postfix(i)

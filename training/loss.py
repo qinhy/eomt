@@ -21,9 +21,6 @@ from torchvision.ops import box_convert, generalized_box_iou, generalized_box_io
 from transformers.models.mask2former.modeling_mask2former import (
     Mask2FormerHungarianMatcher,
     Mask2FormerLoss,
-    pair_wise_dice_loss,
-    pair_wise_sigmoid_cross_entropy_loss,
-    sample_point,
 )
 
 
@@ -45,153 +42,6 @@ def box_cxcywh_to_xyxy(boxes: torch.Tensor) -> torch.Tensor:
 
     return torch.stack([x_min, y_min, x_max, y_max], dim=-1).clamp(0, 1)
 
-class BoxAwareMask2FormerHungarianMatcher(nn.Module):
-    """
-    Mask2Former-style Hungarian matcher with optional bbox L1 + GIoU costs.
-
-    Supports:
-      - mask-only matching
-      - box-only matching
-      - hybrid mask+box matching
-
-    Expected box format:
-      - predictions: normalized cxcywh, shape [B, Q, 4]
-      - labels: list of [Ni, 4] normalized cxcywh
-    """
-
-    def __init__(
-        self,
-        num_points: int = 12544,
-        cost_class: float = 1.0,
-        cost_mask: float = 1.0,
-        cost_dice: float = 1.0,
-        cost_bbox: float = 0.0,
-        cost_giou: float = 0.0,
-    ) -> None:
-        super().__init__()
-        if cost_class == 0 and cost_mask == 0 and cost_dice == 0 and cost_bbox == 0 and cost_giou == 0:
-            raise ValueError("All matcher costs cannot be zero.")
-
-        self.num_points = num_points
-        self.cost_class = float(cost_class)
-        self.cost_mask = float(cost_mask)
-        self.cost_dice = float(cost_dice)
-        self.cost_bbox = float(cost_bbox)
-        self.cost_giou = float(cost_giou)
-
-    def _validate_targets(
-        self,
-        class_labels: List[torch.Tensor],
-        mask_labels: Optional[List[torch.Tensor]],
-        box_labels: Optional[List[torch.Tensor]],
-    ) -> None:
-        if mask_labels is not None and len(mask_labels) != len(class_labels):
-            raise ValueError("mask_labels and class_labels must have the same batch size")
-        if box_labels is not None and len(box_labels) != len(class_labels):
-            raise ValueError("box_labels and class_labels must have the same batch size")
-
-        for batch_idx, labels in enumerate(class_labels):
-            num_targets = labels.shape[0]
-
-            if mask_labels is not None and mask_labels[batch_idx].shape[0] != num_targets:
-                raise ValueError(
-                    f"mask_labels[{batch_idx}] has {mask_labels[batch_idx].shape[0]} instances "
-                    f"but class_labels[{batch_idx}] has {num_targets}"
-                )
-
-            if box_labels is not None and box_labels[batch_idx].shape[0] != num_targets:
-                raise ValueError(
-                    f"box_labels[{batch_idx}] has {box_labels[batch_idx].shape[0]} instances "
-                    f"but class_labels[{batch_idx}] has {num_targets}"
-                )
-
-    @torch.no_grad()
-    def forward(
-        self,
-        masks_queries_logits: Optional[torch.Tensor],
-        class_queries_logits: torch.Tensor,
-        mask_labels: Optional[List[torch.Tensor]],
-        class_labels: List[torch.Tensor],
-        bbox_queries_preds: Optional[torch.Tensor] = None,
-        box_labels: Optional[List[torch.Tensor]] = None,
-    ) -> List[Tuple[torch.Tensor, torch.Tensor]]:
-        self._validate_targets(class_labels, mask_labels, box_labels)
-
-        use_masks = (self.cost_mask > 0 or self.cost_dice > 0)
-        use_boxes = (self.cost_bbox > 0 or self.cost_giou > 0)
-
-        if use_masks and (masks_queries_logits is None or mask_labels is None):
-            raise ValueError("Mask costs are enabled, but masks_queries_logits or mask_labels is missing.")
-        if use_boxes and (bbox_queries_preds is None or box_labels is None):
-            raise ValueError("Box costs are enabled, but bbox_queries_preds or box_labels is missing.")
-
-        batch_size = class_queries_logits.shape[0]
-        device = class_queries_logits.device
-        indices: List[Tuple[torch.Tensor, torch.Tensor]] = []
-
-        for i in range(batch_size):
-            target_classes = class_labels[i].to(device=device, dtype=torch.long)
-            num_targets = target_classes.numel()
-
-            if num_targets == 0:
-                empty = torch.empty(0, dtype=torch.int64, device=device)
-                indices.append((empty, empty))
-                continue
-
-            pred_probs = class_queries_logits[i].softmax(-1)  # [Q, C+1]
-            cost_matrix = self.cost_class * (-pred_probs[:, target_classes])  # [Q, N]
-
-            if use_masks:
-                pred_mask = masks_queries_logits[i][:, None]  # [Q, 1, H, W]
-                tgt_mask = mask_labels[i].to(device=pred_mask.device, dtype=pred_mask.dtype)[:, None]  # [N, 1, H, W]
-
-                point_coords = torch.rand(1, self.num_points, 2, device=device)
-
-                pred_points = sample_point(
-                    pred_mask,
-                    point_coords.repeat(pred_mask.shape[0], 1, 1),
-                    align_corners=False,
-                ).squeeze(1)  # [Q, P]
-
-                tgt_points = sample_point(
-                    tgt_mask,
-                    point_coords.repeat(tgt_mask.shape[0], 1, 1),
-                    align_corners=False,
-                ).squeeze(1)  # [N, P]
-
-                if self.cost_mask > 0:
-                    cost_matrix = cost_matrix + self.cost_mask * pair_wise_sigmoid_cross_entropy_loss(
-                        pred_points, tgt_points
-                    )
-
-                if self.cost_dice > 0:
-                    cost_matrix = cost_matrix + self.cost_dice * pair_wise_dice_loss(pred_points, tgt_points)
-
-            if use_boxes:
-                pred_boxes = bbox_queries_preds[i]  # [Q, 4]
-                tgt_boxes = box_labels[i].to(device=pred_boxes.device, dtype=pred_boxes.dtype)  # [N, 4]
-
-                if self.cost_bbox > 0:
-                    cost_matrix = cost_matrix + self.cost_bbox * torch.cdist(pred_boxes.float(), tgt_boxes.float(), p=1)
-
-                if self.cost_giou > 0:
-                    pred_xyxy = box_cxcywh_to_xyxy(pred_boxes)
-                    tgt_xyxy = box_cxcywh_to_xyxy(tgt_boxes)
-                    cost_matrix = cost_matrix + self.cost_giou * (-generalized_box_iou(pred_xyxy, tgt_xyxy))
-
-            cost_matrix = torch.nan_to_num(cost_matrix, nan=0.0, posinf=1e10, neginf=-1e10)
-            cost_matrix = cost_matrix.clamp(min=-1e10, max=1e10)
-
-            src_idx, tgt_idx = linear_sum_assignment(cost_matrix.detach().cpu())
-            indices.append(
-                (
-                    torch.as_tensor(src_idx, dtype=torch.int64, device=device),
-                    torch.as_tensor(tgt_idx, dtype=torch.int64, device=device),
-                )
-            )
-
-        return indices
-
 class MaskClassificationLoss(Mask2FormerLoss):
     def __init__(
         self,
@@ -205,6 +55,8 @@ class MaskClassificationLoss(Mask2FormerLoss):
         no_object_coefficient: float,
         bbox_l1_coefficient: float = 0.0,
         bbox_giou_coefficient: float = 0.0,
+        owner_coefficient: float = 0.0,
+        owner_ignore_index: int = 255,
     ):
         # We intentionally do not call Mask2FormerLoss.__init__ because you are
         # using a manual constructor layout rather than HF config + weight_dict.
@@ -219,6 +71,8 @@ class MaskClassificationLoss(Mask2FormerLoss):
         self.class_coefficient = class_coefficient
         self.bbox_l1_coefficient = bbox_l1_coefficient
         self.bbox_giou_coefficient = bbox_giou_coefficient
+        self.owner_coefficient = owner_coefficient
+        self.owner_ignore_index = owner_ignore_index
 
         self.num_labels = num_labels
         self.eos_coef = no_object_coefficient
@@ -226,15 +80,6 @@ class MaskClassificationLoss(Mask2FormerLoss):
         empty_weight = torch.ones(self.num_labels + 1)
         empty_weight[-1] = self.eos_coef
         self.register_buffer("empty_weight", empty_weight)
-
-        # self.matcher = BoxAwareMask2FormerHungarianMatcher(
-        #     num_points=num_points,
-        #     cost_mask=mask_coefficient,
-        #     cost_dice=dice_coefficient,
-        #     cost_class=class_coefficient,
-        #     cost_bbox=bbox_l1_coefficient,
-        #     cost_giou=bbox_giou_coefficient,
-        # )
 
         self.matcher = Mask2FormerHungarianMatcher(
             num_points=num_points,
@@ -269,7 +114,7 @@ class MaskClassificationLoss(Mask2FormerLoss):
         """
         box_labels = []
         for target in targets:
-            boxes_xyxy:tv_tensors.BoundingBoxes = target["boxes"]
+            boxes_xyxy: tv_tensors.BoundingBoxes = target["boxes"]
             h, w = boxes_xyxy.canvas_size
             scale = torch.tensor([w, h, w, h], device=device, dtype=dtype)
 
@@ -279,12 +124,126 @@ class MaskClassificationLoss(Mask2FormerLoss):
 
         return box_labels
 
+    def build_owner_targets(
+        self,
+        targets: List[dict],
+        indices,
+        height: int,
+        width: int,
+        num_queries: int,
+        device: torch.device,
+        ignore_index: Optional[int] = None,
+    ) -> torch.Tensor:
+        """
+        Build per-pixel owner targets for owner_queries_logits.
+
+        Output shape: [B, H, W]
+        Values:
+          0..Q-1 : query id that owns the pixel
+          Q      : background
+          ignore_index : ambiguous overlapping GT pixels
+        """
+        if ignore_index is None:
+            ignore_index = self.owner_ignore_index
+
+        batch_size = len(targets)
+        bg_id = num_queries
+
+        owner_targets = torch.full(
+            (batch_size, height, width),
+            fill_value=bg_id,
+            dtype=torch.long,
+            device=device,
+        )
+
+        for b, (target, (src_idx, tgt_idx)) in enumerate(zip(targets, indices)):
+            if src_idx.numel() == 0:
+                continue
+
+            gt_masks = target["masks"].to(device=device, dtype=torch.float32)  # [N_gt, H0, W0]
+
+            if gt_masks.shape[-2:] != (height, width):
+                gt_masks = F.interpolate(
+                    gt_masks[:, None],
+                    size=(height, width),
+                    mode="nearest",
+                )[:, 0]
+
+            gt_masks = gt_masks > 0.5
+            matched_masks = gt_masks[tgt_idx]  # [M, H, W]
+
+            # Ambiguous pixels where multiple GT instances overlap.
+            # Those cannot be represented by hard owner assignment, so ignore them.
+            ambiguous = matched_masks.sum(dim=0) > 1
+            if ambiguous.any():
+                owner_targets[b][ambiguous] = ignore_index
+
+            for q_idx, mask in zip(src_idx.tolist(), matched_masks):
+                owner_targets[b][mask & (~ambiguous)] = q_idx
+
+        return owner_targets
+
+    def loss_owner(
+        self,
+        owner_queries_logits: torch.Tensor,  # [B, Q+1, H, W]
+        targets: List[dict],
+        indices,
+        ignore_index: Optional[int] = None,
+    ):
+        """
+        Per-pixel owner CE across queries + background.
+
+        This is the key loss for non-overlap-by-design:
+        each pixel chooses one query id or background.
+        """
+        if ignore_index is None:
+            ignore_index = self.owner_ignore_index
+
+        zero = owner_queries_logits.sum() * 0.0
+
+        if owner_queries_logits is None:
+            return {"loss_owner": zero}
+
+        if owner_queries_logits.ndim != 4:
+            raise ValueError(
+                f"owner_queries_logits must have shape [B, Q+1, H, W], got {tuple(owner_queries_logits.shape)}"
+            )
+
+        batch_size, q_plus_bg, height, width = owner_queries_logits.shape
+        num_queries = q_plus_bg - 1
+
+        if num_queries <= 0:
+            return {"loss_owner": zero}
+
+        owner_targets = self.build_owner_targets(
+            targets=targets,
+            indices=indices,
+            height=height,
+            width=width,
+            num_queries=num_queries,
+            device=owner_queries_logits.device,
+            ignore_index=ignore_index,
+        )
+
+        valid = owner_targets != ignore_index
+        if not valid.any():
+            return {"loss_owner": zero}
+
+        loss_owner = F.cross_entropy(
+            owner_queries_logits,
+            owner_targets,
+            ignore_index=ignore_index,
+        )
+
+        return {"loss_owner": loss_owner}
+
     def forward(
         self,
         masks_queries_logits: torch.Tensor,
         targets: List[dict],
         class_queries_logits: torch.Tensor,
         bbox_queries_preds: Optional[torch.Tensor] = None,
+        owner_queries_logits: Optional[torch.Tensor] = None,
     ):
         device = masks_queries_logits.device
         dtype = masks_queries_logits.dtype
@@ -300,45 +259,56 @@ class MaskClassificationLoss(Mask2FormerLoss):
             else None
         )
 
-        # IMPORTANT:
-        # bbox_queries_preds must already be normalized cxcywh in [0,1].
-        # If your bbox head outputs raw values, pass bbox_queries_preds.sigmoid().
         if bbox_queries_preds is not None:
             bbox_queries_preds = bbox_queries_preds.to(device=device, dtype=dtype)
+
+        if owner_queries_logits is not None:
+            owner_queries_logits = owner_queries_logits.to(device=device, dtype=dtype)
 
         indices = self.matcher.forward(
             masks_queries_logits=masks_queries_logits,
             mask_labels=mask_labels,
             class_queries_logits=class_queries_logits,
             class_labels=class_labels,
-            # bbox_queries_preds=bbox_queries_preds if has_boxes else None,
-            # box_labels=box_labels,
         )
 
         num_instances = self.get_num_instances(class_labels, device=device)
 
         losses = {}
+
         loss_masks = super().loss_masks(
-                masks_queries_logits=masks_queries_logits,
-                mask_labels=mask_labels,
-                indices=indices,
-                num_masks=num_instances,
+            masks_queries_logits=masks_queries_logits,
+            mask_labels=mask_labels,
+            indices=indices,
+            num_masks=num_instances,
         )
+
         loss_labels = super().loss_labels(
-                class_queries_logits=class_queries_logits,
-                class_labels=class_labels,
-                indices=indices,
-            )
-        loss_boxes = self.loss_boxes(
-                    bbox_queries_preds=bbox_queries_preds,
-                    box_labels=box_labels,
-                    indices=indices,
-                    num_instances=num_instances,
+            class_queries_logits=class_queries_logits,
+            class_labels=class_labels,
+            indices=indices,
         )
+
         losses.update(loss_masks)
         losses.update(loss_labels)
+
         if has_boxes:
+            loss_boxes = self.loss_boxes(
+                bbox_queries_preds=bbox_queries_preds,
+                box_labels=box_labels,
+                indices=indices,
+                num_instances=num_instances,
+            )
             losses.update(loss_boxes)
+
+        if owner_queries_logits is not None:
+            loss_owner = self.loss_owner(
+                owner_queries_logits=owner_queries_logits,
+                targets=targets,
+                indices=indices,
+            )
+            losses.update(loss_owner)
+
         return losses
 
     def loss_boxes(
@@ -389,7 +359,6 @@ class MaskClassificationLoss(Mask2FormerLoss):
         if not valid_xyxy.any():
             return {"loss_bbox": zero, "loss_giou": zero}
 
-        # If you want to ignore bad pairs entirely, use the same mask for both losses
         src_boxes = src_boxes[valid_xyxy]
         target_boxes = target_boxes[valid_xyxy]
         src_xyxy = src_xyxy[valid_xyxy]
@@ -406,7 +375,6 @@ class MaskClassificationLoss(Mask2FormerLoss):
             eps=1e-7,
         )
 
-        # extra safety
         finite_giou = torch.isfinite(loss_giou_vec)
         loss_giou = loss_giou_vec[finite_giou].sum() if finite_giou.any() else zero
 
@@ -424,6 +392,7 @@ class MaskClassificationLoss(Mask2FormerLoss):
             "cls": None,
             "bbox": None,
             "giou": None,
+            "owner": None,
         }
 
         for loss_key, loss in losses_all_layers.items():
@@ -450,6 +419,9 @@ class MaskClassificationLoss(Mask2FormerLoss):
             elif "loss_giou" in loss_key:
                 weighted_loss = loss * self.bbox_giou_coefficient
                 progress_key = "giou"
+            elif "loss_owner" in loss_key:
+                weighted_loss = loss * self.owner_coefficient
+                progress_key = "owner"
             else:
                 raise ValueError(f"Unknown loss key: {loss_key}")
 
@@ -470,7 +442,6 @@ class MaskClassificationLoss(Mask2FormerLoss):
             on_epoch=False,
             sync_dist=False,
         )
-
         for progress_key, value in progress_bar_totals.items():
             if value is None:
                 continue
@@ -494,4 +465,5 @@ class MaskClassificationLoss(Mask2FormerLoss):
             logger=False,
         )
 
-        return total
+        return total  
+
