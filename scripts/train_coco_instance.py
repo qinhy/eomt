@@ -133,6 +133,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-q", type=int, default=200)
     parser.add_argument("--num-blocks", type=int, default=4)
     parser.add_argument("--num-classes", type=int, default=80)
+    parser.add_argument("--bbox-head-weight", type=float, default=0.1)
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--llrd", type=float, default=0.8)
     parser.add_argument("--lr-mult", type=float, default=1.0)
