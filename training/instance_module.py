@@ -144,6 +144,13 @@ class MaskClassificationInstance(TrainModule):
         if bbox_preds is not None:
             bbox_preds = bbox_preds[keep]       # [Qk, 4]
 
+        owner_fg = None
+        owner_bg = None
+        if owner_queries_logits is not None:
+            # owner fg channels correspond to original Q queries
+            owner_fg = owner_queries_logits[:-1][keep]   # [Qk, H, W]
+            owner_bg = owner_queries_logits[-1:]         # [1, H, W]
+
         k = top_k if top_k is not None else self.eval_top_k_instances
         k = min(k, obj_scores.numel())
         if k == 0:
@@ -155,13 +162,15 @@ class MaskClassificationInstance(TrainModule):
         labels = labels[topk_idx]               # [K]
         if bbox_preds is not None:
             bbox_preds = bbox_preds[topk_idx]   # [K, 4]
+        if owner_fg is not None:
+            owner_fg = owner_fg[topk_idx]       # [K, H, W]
 
         # ------------------------------------------------------------------
         # Hybrid path: use owner logits as final mask partition
         # ------------------------------------------------------------------
         if owner_queries_logits is not None:
             # compete among selected queries + background
-            fused_owner_logits = owner_queries_logits # [Q+1, H, W]
+            fused_owner_logits = torch.cat([owner_fg, owner_bg], dim=0)       # [K+1, H, W]
 
             owner_probs = fused_owner_logits.softmax(dim=0)  # over query axis
             owner_id = owner_probs.argmax(dim=0)             # [H, W], last = bg index
@@ -172,13 +181,14 @@ class MaskClassificationInstance(TrainModule):
             valid_query_idx = []
 
             for i in range(k):
-                mask = owner_id == i
+                mask = (owner_id == i)
+                mask = mask * (mask_logits[i]>0)
                 area = int(mask.sum().item())
-                if area == 0:
-                    continue
-
+                if area == 0: continue
+                
+                score = mask_logits[i][mask].sigmoid().sum() / area
                 masks.append(mask)
-                mask_scores.append(owner_probs[i][mask].mean())
+                mask_scores.append(score)
                 valid_query_idx.append(i)
 
             if len(masks) == 0:

@@ -313,16 +313,20 @@ class EoMT(nn.Module):
                 patch_tokens_map_x2 = patch_tokens_map            
 
         # old mask head: keep it for mask/dice loss + masked attention
-        mask_logits = torch.einsum("bqd,bdhw->bqhw", query_mask_feats, patch_tokens_map_x2) # (B,Q,Hp*n,Wp*n)
+        binary_mask = mask_logits = torch.einsum("bqd,bdhw->bqhw", query_mask_feats, patch_tokens_map_x2) # (B,Q,Hp*n,Wp*n)
 
         # new owner head: final non-overlap competition head
         owner_queries_logits = None
         if self.owner_head_enabled:
             owner_queries = output_logits[:, :, (cls_num + D) : (cls_num + D) + D]  # (B,Q,D)
             owner_queries_logits = torch.einsum("bqd,bdhw->bqhw", owner_queries, patch_tokens_map_x2) # (B,Q,Hp*n,Wp*n)
-            # fuse with mask_logits
-            owner_queries_logits = mask_logits = owner_queries_logits*self.owner_fusion_alpha + mask_logits*(1.0-self.owner_fusion_alpha)
             
+            # fuse with mask_logits
+            # owner_queries_logits = mask_logits = owner_queries_logits*self.owner_fusion_alpha + mask_logits*(1.0-self.owner_fusion_alpha)            
+            # binary_mask = F.one_hot(owner_queries_logits.argmax(dim=1),
+            #                         num_classes=owner_queries_logits.shape[1]).to(dtype=owner_queries_logits.dtype) # (B,Hp*n,Wp*n,Q)
+            # binary_mask = binary_mask.permute(0,3,1,2) # (B,Q,Hp*n,Wp*n)
+
         bbox_preds = None
         if self.bbox_head_enabled:
             bbox_preds = output_logits[:, :, -4 :].sigmoid() # normalized cxcywh in [0,1].
