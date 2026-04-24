@@ -290,27 +290,28 @@ def build_model(args: argparse.Namespace):
     from training.instance_module import MaskClassificationInstance
 
     if args.network_impl == "original_bbox":
-        from models.eomt import freeze_module_as_buffers
-        from models.official_eomt import load_official_dinov3_delta
-        from models.original_eomt import EoMT as BboxEoMT
-        from models.vit import ViT
-        network = BboxEoMT(
-            encoder=ViT(
-                img_size=args.img_size,
-                backbone_name=args.official_backbone_name,
-            ),
-            num_classes=args.num_classes,
-            num_q=args.num_q,
-            num_blocks=args.num_blocks,
-            masked_attn_enabled=args.masked_attn_enabled
-        )
-        if os.path.exists(args.official_delta_ckpt):
-            load_official_dinov3_delta(network, str(args.official_delta_ckpt))
-        else:
-            print(f"skip load_official_dinov3_delta of no exist {str(args.official_delta_ckpt)}")
-        # freeze_module_as_buffers(network)
-        network.init_bbox_head()
-        delta_weights = False
+        raise ValueError("original_bbox no more use")
+        # from models.eomt import freeze_module_as_buffers
+        # from models.official_eomt import load_official_dinov3_delta
+        # from models.original_eomt import EoMT as BboxEoMT
+        # from models.vit import ViT
+        # network = BboxEoMT(
+        #     encoder=ViT(
+        #         img_size=args.img_size,
+        #         backbone_name=args.official_backbone_name,
+        #     ),
+        #     num_classes=args.num_classes,
+        #     num_q=args.num_q,
+        #     num_blocks=args.num_blocks,
+        #     masked_attn_enabled=args.masked_attn_enabled,
+        # )
+        # if os.path.exists(args.official_delta_ckpt):
+        #     load_official_dinov3_delta(network, str(args.official_delta_ckpt))
+        # else:
+        #     print(f"skip load_official_dinov3_delta of no exist {str(args.official_delta_ckpt)}")
+        # # freeze_module_as_buffers(network)
+        # network.init_bbox_head()
+        # delta_weights = False
     else:
         from models.eomt import EoMT
 
@@ -325,6 +326,7 @@ def build_model(args: argparse.Namespace):
             encoder_model=args.encoder_model,
             fsrcnnx2=True,
             precision=args.precision,
+            bbox_head_weight=args.bbox_head_weight,
         )
         delta_weights = args.delta_weights
 
