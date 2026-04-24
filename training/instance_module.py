@@ -144,13 +144,6 @@ class MaskClassificationInstance(TrainModule):
         if bbox_preds is not None:
             bbox_preds = bbox_preds[keep]       # [Qk, 4]
 
-        owner_fg = None
-        owner_bg = None
-        if owner_queries_logits is not None:
-            # owner fg channels correspond to original Q queries
-            owner_fg = owner_queries_logits[:-1][keep]   # [Qk, H, W]
-            owner_bg = owner_queries_logits[-1:]         # [1, H, W]
-
         k = top_k if top_k is not None else self.eval_top_k_instances
         k = min(k, obj_scores.numel())
         if k == 0:
@@ -163,24 +156,15 @@ class MaskClassificationInstance(TrainModule):
         if bbox_preds is not None:
             bbox_preds = bbox_preds[topk_idx]   # [K, 4]
 
-        if owner_fg is not None:
-            owner_fg = owner_fg[topk_idx]       # [K, H, W]
-
         # ------------------------------------------------------------------
         # Hybrid path: use owner logits as final mask partition
         # ------------------------------------------------------------------
-        if owner_fg is not None:
-            if fusion_alpha is None:
-                fusion_alpha = self.owner_fusion_alpha if hasattr(self, "owner_fusion_alpha") else 0.5
-
-            # shape prior from old mask head
-            fused_fg_logits = owner_fg + fusion_alpha * F.logsigmoid(mask_logits)   # [K, H, W]
-
+        if owner_queries_logits is not None:
             # compete among selected queries + background
-            fused_owner_logits = torch.cat([fused_fg_logits, owner_bg], dim=0)       # [K+1, H, W]
+            fused_owner_logits = owner_queries_logits # [Q+1, H, W]
 
-            owner_probs = fused_owner_logits.softmax(dim=0)                          # over query axis
-            owner_id = owner_probs.argmax(dim=0)                                     # [H, W], K = bg index
+            owner_probs = fused_owner_logits.softmax(dim=0)  # over query axis
+            owner_id = owner_probs.argmax(dim=0)             # [H, W], last = bg index
             bg_owner_idx = fused_owner_logits.shape[0] - 1
 
             masks = []
