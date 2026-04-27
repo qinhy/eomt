@@ -435,7 +435,6 @@ class EoMT(nn.Module):
 
     def predict_img(self, x: torch.Tensor, # (C, H, W)
         top_k: int | None = None,
-        ignore_bg: bool = False,
         score_threshold: float = 0.3,
         mask_threshold: float = 0.0):
 
@@ -446,216 +445,233 @@ class EoMT(nn.Module):
         mask_logits, class_logits, bbox_preds, owner_logits = (mask_logits_per_layer[-1], class_logits_per_layer[-1],
                                                                bbox_preds_per_layer[-1], owner_logits_per_layer[-1])
         return self.predict(mask_logits, class_logits, bbox_preds, owner_logits, img_size,
-            top_k=top_k, ignore_bg=ignore_bg, score_threshold=score_threshold, mask_threshold=mask_threshold)
-        
+            top_k=top_k, score_threshold=score_threshold, mask_threshold=mask_threshold)
+    
     def predict(
-            self,mask_logits, class_logits, bbox_preds, owner_logits,img_size,
-            top_k: int = 10,
-            ignore_bg: bool = False,
-            score_threshold: float = 0.3,
-            mask_threshold: float = 0.0,
-        ):
+        self,
+        mask_logits,
+        class_logits,
+        bbox_preds,
+        owner_logits,
+        img_size,
+        top_k: int = 10,
+        score_threshold: float = 0.3,
+        mask_threshold: float = 0.0,
+    ):
         img_h, img_w = img_size
 
         was_training = self.training
         self.eval()
 
-        # mask_logits = mask_logits_per_layer[-1]       # [1, Q, Hm, Wm]
-        # class_logits = class_logits_per_layer[-1]     # [1, Q, C + 1]
-        # bbox_preds = bbox_preds_per_layer[-1]         # [1, Q, 4]
-        # owner_logits = owner_logits_per_layer[-1]     # [1, Q + 1, Hm, Wm]
-        B, Q, mask_h, mask_w = mask_logits.shape
-        _, Q_cls, cls_p1 = class_logits.shape
-        _, Q_box, box_dim = bbox_preds.shape
-        _, Q_p1, owner_h, owner_w = owner_logits.shape
+        try:
+            # ------------------------------------------------------------
+            # Validate shapes.
+            # ------------------------------------------------------------
+            B, Q, mask_h, mask_w = mask_logits.shape
+            _, Q_cls, cls_p1 = class_logits.shape
+            _, Q_box, box_dim = bbox_preds.shape
+            _, Q_p1, owner_h, owner_w = owner_logits.shape
 
-        if B != 1:
-            raise ValueError(f"batch size mismatch: got {B}, expected 1")
+            if B != 1:
+                raise ValueError(f"batch size mismatch: got {B}, expected 1")
 
-        if Q_cls != Q:
-            raise ValueError(f"class_logits Q mismatch: got {Q_cls}, expected {Q}")
+            if Q_cls != Q:
+                raise ValueError(f"class_logits Q mismatch: got {Q_cls}, expected {Q}")
 
-        if Q_box != Q or box_dim != 4:
-            raise ValueError(f"bbox_preds shape mismatch: got {bbox_preds.shape}, expected [B, Q, 4]")
+            if Q_box != Q or box_dim != 4:
+                raise ValueError(
+                    f"bbox_preds shape mismatch: got {bbox_preds.shape}, expected [B, Q, 4]"
+                )
 
-        if Q_p1 != Q + 1:
-            raise ValueError(f"owner_logits shape mismatch: got {owner_logits.shape}, expected [B, Q + 1, H, W]")
+            if Q_p1 != Q + 1:
+                raise ValueError(
+                    f"owner_logits shape mismatch: got {owner_logits.shape}, expected [B, Q + 1, H, W]"
+                )
 
-        if (owner_h, owner_w) != (mask_h, mask_w):
-            raise ValueError(
-                f"owner/mask spatial mismatch: owner={(owner_h, owner_w)}, mask={(mask_h, mask_w)}"
+            if (owner_h, owner_w) != (mask_h, mask_w):
+                raise ValueError(
+                    f"owner/mask spatial mismatch: owner={(owner_h, owner_w)}, mask={(mask_h, mask_w)}"
+                )
+
+            device = mask_logits.device
+
+            def empty_prediction():
+                return {
+                    "masks": torch.zeros((0, img_h, img_w), dtype=torch.bool, device=device),
+                    "labels": torch.zeros((0,), dtype=torch.long, device=device),
+                    "scores": torch.zeros((0,), dtype=class_logits.dtype, device=device),
+                    "boxes": torch.zeros((0, 4), dtype=bbox_preds.dtype, device=device),
+                }
+
+            def resize_bool_masks(masks: torch.Tensor) -> torch.Tensor:
+                # masks: [N, Hm, Wm]
+                if masks.shape[-2:] == img_size:
+                    return masks
+
+                if masks.numel() == 0:
+                    return torch.zeros(
+                        (0, img_h, img_w),
+                        dtype=torch.bool,
+                        device=masks.device,
+                    )
+
+                return F.interpolate(
+                    masks[:, None].float(),
+                    size=img_size,
+                    mode="bilinear",
+                )[:, 0] > 0.5
+
+            def resize_owner_id(owner_id: torch.Tensor) -> torch.Tensor:
+                # owner_id: [Hm, Wm]
+                if owner_id.shape[-2:] == img_size:
+                    return owner_id
+
+                return F.interpolate(
+                    owner_id[None, None].float(),
+                    size=img_size,
+                    mode="nearest",
+                )[0, 0].long()
+
+            # ------------------------------------------------------------
+            # Remove batch dimension.
+            # ------------------------------------------------------------
+            mask_logits = mask_logits[0]        # [Q, Hm, Wm]
+            class_logits = class_logits[0]      # [Q, C + 1]
+            bbox_preds = bbox_preds[0]          # [Q, 4]
+            owner_logits = owner_logits[0]      # [Q + 1, Hm, Wm]
+
+            # ------------------------------------------------------------
+            # Class scores.
+            # Assumption: last class is "no object" / background.
+            # ------------------------------------------------------------
+            probs = class_logits.softmax(dim=-1)        # [Q, C + 1]
+            obj_probs = probs[:, :-1]                   # [Q, C]
+            obj_scores, pred_labels = obj_probs.max(dim=-1)  # [Q], [Q]
+
+            # ------------------------------------------------------------
+            # Vectorized owner-based mask extraction.
+            # ------------------------------------------------------------
+            owner_id = owner_logits.argmax(dim=0)       # [Hm, Wm]
+
+            query_ids = torch.arange(
+                Q,
+                device=owner_id.device,
+            )[:, None, None]                            # [Q, 1, 1]
+
+            # fuse owner preds and mask logits
+            all_masks = (
+                (owner_id[None, :, :] == query_ids) &
+                (mask_logits > mask_threshold)
+            )                                           # [Q, Hm, Wm]
+
+            areas = all_masks.flatten(1).sum(dim=1)     # [Q]
+            valid = areas > 0                           # [Q]
+
+            if valid.sum().item() == 0:
+                return empty_prediction()
+
+            mask_probs = mask_logits.sigmoid()          # [Q, Hm, Wm]
+
+            mask_scores = (
+                (mask_probs * all_masks.to(mask_probs.dtype)).flatten(1).sum(dim=1)
+                / areas.clamp_min(1).to(mask_probs.dtype)
+            )                                           # [Q]
+
+            # ------------------------------------------------------------
+            # Keep only valid queries.
+            # Everything below is now indexed in valid-query space [N].
+            # ------------------------------------------------------------
+            valid_query_idx = torch.nonzero(valid, as_tuple=False).squeeze(1)  # [N]
+
+            masks = all_masks[valid]                    # [N, Hm, Wm]
+            mask_scores = mask_scores[valid]            # [N]
+
+            scores = obj_scores[valid_query_idx] * mask_scores  # [N]
+            labels = pred_labels[valid_query_idx]               # [N]
+            bbox_preds = bbox_preds[valid_query_idx]            # [N, 4]
+
+            # ------------------------------------------------------------
+            # Score threshold.
+            # Important: filter masks, scores, labels, and boxes together.
+            # ------------------------------------------------------------
+            if score_threshold is not None:
+                keep = scores >= score_threshold
+
+                masks = masks[keep]
+                scores = scores[keep]
+                labels = labels[keep]
+                bbox_preds = bbox_preds[keep]
+
+                if scores.numel() == 0:
+                    return empty_prediction()
+
+            # ------------------------------------------------------------
+            # Top-k.
+            # Important: topk_idx indexes the already-filtered tensors.
+            # ------------------------------------------------------------
+            if top_k is not None:
+                k = min(int(top_k), scores.numel())
+            else:
+                k = scores.numel()
+
+            if k == 0:
+                return empty_prediction()
+
+            scores, topk_idx = scores.topk(
+                k,
+                largest=True,
+                sorted=False,
             )
 
-        device = class_logits.device
+            masks = masks[topk_idx]             # [K, Hm, Wm]
+            labels = labels[topk_idx]           # [K]
+            bbox_preds = bbox_preds[topk_idx]   # [K, 4]
 
-        def empty_prediction(self=self,was_training=was_training):
-            if was_training:
-                self.train()
-            return {
-                "masks": torch.zeros((0, img_h, img_w), dtype=torch.bool, device=device),
-                "labels": torch.zeros((0,), dtype=torch.long, device=device),
-                "scores": torch.zeros((0,), dtype=class_logits.dtype, device=device),
-                "boxes": torch.zeros((0, 4), dtype=bbox_preds.dtype, device=device),
+            # ------------------------------------------------------------
+            # Resize masks back to input image size.
+            # ------------------------------------------------------------
+            masks = resize_bool_masks(masks)    # [K, img_h, img_w]
+
+            # ------------------------------------------------------------
+            # Convert normalized cxcywh boxes to absolute xyxy boxes.
+            # ------------------------------------------------------------
+            boxes = box_convert(
+                bbox_preds,
+                in_fmt="cxcywh",
+                out_fmt="xyxy",
+            ).clamp(0, 1)
+
+            scale = torch.tensor(
+                [img_w, img_h, img_w, img_h],
+                device=boxes.device,
+                dtype=boxes.dtype,
+            )
+
+            boxes = boxes * scale
+
+            # ------------------------------------------------------------
+            # Painter-style low-score -> high-score ordering.
+            # ------------------------------------------------------------
+            order = scores.argsort(descending=False)
+
+            masks = masks[order]
+            labels = labels[order]
+            scores = scores[order]
+            boxes = boxes[order]
+
+            owner_id_img = resize_owner_id(owner_id)
+
+            result = {
+                "masks": masks,
+                "labels": labels,
+                "scores": scores,
+                "boxes": boxes,
+                "owner_id": owner_id_img,
             }
 
-        def resize_bool_masks(masks: torch.Tensor) -> torch.Tensor:
-            # masks: [N, Hm, Wm]
-            if masks.shape[-2:] == img_size: return masks
-            return F.interpolate( masks[:, None].float(), size=img_size, mode="bilinear",
-                   )[:, 0] > 0.5
+            return result
 
-        def resize_owner_id(owner_id: torch.Tensor) -> torch.Tensor:
-            # owner_id: [Hm, Wm]
-            if owner_id.shape[-2:] == img_size: return owner_id
-            return F.interpolate(owner_id[None, None].float(), size=img_size, mode="nearest",
-                    )[0, 0].long()
-
-        # ------------------------------------------------------------
-        # Remove batch dimension.
-        # ------------------------------------------------------------
-        mask_logits = mask_logits[0].clone()       # [Q, Hm, Wm]
-        class_logits = class_logits[0].clone()     # [Q, C + 1]
-        bbox_preds = bbox_preds[0].clone()         # [Q, 4]
-        owner_logits = owner_logits[0].clone()     # [Q + 1, Hm, Wm]
-
-        cls_num = cls_p1 - 1
-        bg_class_idx = cls_num
-
-        probs = class_logits.softmax(dim=-1)       # [Q, C + 1]
-        obj_probs = probs[:, :-1]                  # [Q, C]
-
-        obj_scores, labels = obj_probs.max(dim=-1) # [Q], [Q]
-        pred_all = probs.argmax(dim=-1)            # [Q]
-
-        keep = torch.ones_like(obj_scores, dtype=torch.bool)
-
-        if ignore_bg:
-            keep = keep & (pred_all != bg_class_idx)
-        
-        if score_threshold is not None:
-            keep = keep & (obj_scores >= score_threshold)
-
-        if keep.sum().item() == 0:
-            return empty_prediction()
-
-        # ------------------------------------------------------------
-        # Filter by class score.
-        # ------------------------------------------------------------
-        mask_logits = mask_logits[keep]       # [Qk, Hm, Wm]
-        obj_scores = obj_scores[keep]         # [Qk]
-        labels = labels[keep]                 # [Qk]
-        bbox_preds = bbox_preds[keep]         # [Qk, 4]
-
-
-        k = top_k if top_k is not None else 100
-        k = min(int(k), obj_scores.numel())
-
-        if k == 0: return empty_prediction()
-
-        topk_scores, topk_idx = obj_scores.topk(
-            k,
-            largest=True,
-            sorted=False,
-        )
-
-        mask_logits = mask_logits[topk_idx]   # [K, Hm, Wm]
-        labels = labels[topk_idx]             # [K]
-        bbox_preds = bbox_preds[topk_idx]     # [K, 4]
-
-        # Foreground owner channels correspond to the original Q queries.
-        owner_fg = owner_logits[:Q][keep]     # [Qk, Hm, Wm]
-        owner_bg = owner_logits[Q:Q + 1]      # [1, Hm, Wm]
-        owner_fg = owner_fg[topk_idx]         # [K, Hm, Wm]
-
-        # ------------------------------------------------------------
-        # Owner competition among selected queries + background.
-        # ------------------------------------------------------------
-        tau = max(float(getattr(self, "owner_tau", 1.0)), 1e-6)
-
-        fused_owner_logits = torch.cat(
-            [owner_fg, owner_bg],
-            dim=0,
-        )                                     # [K + 1, Hm, Wm]
-
-        owner_probs = (fused_owner_logits / tau).softmax(dim=0)
-        owner_id = owner_probs.argmax(dim=0)  # [Hm, Wm]
-
-        bg_owner_idx = fused_owner_logits.shape[0] - 1
-
-        masks = []
-        mask_scores = []
-        valid_query_idx = []
-
-        for i in range(k):
-            mask = (owner_id == i) & (mask_logits[i] > mask_threshold)
-
-            area = int(mask.sum().item())
-            if area == 0:
-                continue
-
-            score = mask_logits[i][mask].sigmoid().mean()
-
-            masks.append(mask)
-            mask_scores.append(score)
-            valid_query_idx.append(i)
-
-        if len(masks) == 0:
-            return empty_prediction()
-
-        masks = torch.stack(masks, dim=0)             # [N, Hm, Wm]
-        mask_scores = torch.stack(mask_scores, dim=0) # [N]
-
-        valid_query_idx = torch.tensor(
-            valid_query_idx,
-            dtype=torch.long,
-            device=device,
-        )
-
-        labels = labels[valid_query_idx]
-        scores = topk_scores[valid_query_idx] * mask_scores
-        bbox_preds = bbox_preds[valid_query_idx]
-
-
-        # Resize masks back to input image size.
-        masks = resize_bool_masks(masks)
-
-        boxes = box_convert(
-            bbox_preds,
-            in_fmt="cxcywh",
-            out_fmt="xyxy",
-        ).clamp(0, 1)
-
-        scale = torch.tensor(
-            [img_w, img_h, img_w, img_h],
-            device=boxes.device,
-            dtype=boxes.dtype,
-        )
-
-        boxes = boxes * scale
-
-        # Painter-style low-score -> high-score ordering.
-        order = scores.argsort(descending=False)
-
-        masks = masks[order]
-        labels = labels[order]
-        scores = scores[order]
-        boxes = boxes[order]
-
-        owner_id_img = resize_owner_id(owner_id)
-        background_mask = owner_id_img == bg_owner_idx
-
-        result = {
-            "masks": masks,
-            "labels": labels,
-            "scores": scores,
-            "boxes": boxes,
-            "owner_id": owner_id_img,
-            "background_mask": background_mask,
-        }
-
-            
-        if was_training:
-            self.train()
-
-        return result
+        finally:
+            if was_training:
+                self.train()
 

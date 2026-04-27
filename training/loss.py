@@ -133,15 +133,23 @@ class MaskClassificationLoss(Mask2FormerLoss):
         num_queries: int,
         device: torch.device,
         ignore_index: Optional[int] = None,
+        train_background: bool = False,
+        bg_sample_ratio: float = 3.0,
     ) -> torch.Tensor:
         """
         Build per-pixel owner targets for owner_queries_logits.
 
         Output shape: [B, H, W]
+
         Values:
-          0..Q-1 : query id that owns the pixel
-          Q      : background
-          ignore_index : ambiguous overlapping GT pixels
+        0..Q-1       : query id that owns the pixel
+        Q            : background, optional sampled safe background
+        ignore_index : unknown / unlabeled / ambiguous pixels
+
+        Important:
+        For COCO-style instance datasets, do NOT mark every pixel outside GT
+        as background. Many pixels may belong to unlabeled objects or categories
+        outside the instance taxonomy.
         """
         if ignore_index is None:
             ignore_index = self.owner_ignore_index
@@ -149,15 +157,19 @@ class MaskClassificationLoss(Mask2FormerLoss):
         batch_size = len(targets)
         bg_id = num_queries
 
+        # Important change:
+        # Start as ignore, not background.
         owner_targets = torch.full(
             (batch_size, height, width),
-            fill_value=bg_id,
+            fill_value=ignore_index,
             dtype=torch.long,
             device=device,
         )
 
         for b, (target, (src_idx, tgt_idx)) in enumerate(zip(targets, indices)):
             if src_idx.numel() == 0:
+                # No matched GT. For COCO, better to ignore the whole image
+                # for owner loss instead of saying everything is background.
                 continue
 
             gt_masks = target["masks"].to(device=device, dtype=torch.float32)  # [N_gt, H0, W0]
@@ -169,17 +181,51 @@ class MaskClassificationLoss(Mask2FormerLoss):
                     mode="nearest",
                 )[:, 0]
 
-            gt_masks = gt_masks > 0.5
-            matched_masks = gt_masks[tgt_idx]  # [M, H, W]
+            gt_masks = gt_masks > 0.5  # [N_gt, H, W]
 
-            # Ambiguous pixels where multiple GT instances overlap.
-            # Those cannot be represented by hard owner assignment, so ignore them.
+            # All annotated GT pixels.
+            # These are known object regions, even if they were not matched.
+            annotated_union = gt_masks.any(dim=0)  # [H, W]
+
+            matched_masks = gt_masks[tgt_idx]      # [M, H, W]
+
+            # Ambiguous pixels where multiple matched instances overlap.
             ambiguous = matched_masks.sum(dim=0) > 1
-            if ambiguous.any():
-                owner_targets[b][ambiguous] = ignore_index
 
+            # Positive owner supervision only inside matched GT masks.
             for q_idx, mask in zip(src_idx.tolist(), matched_masks):
                 owner_targets[b][mask & (~ambiguous)] = q_idx
+
+            # Keep ambiguous pixels ignored.
+            owner_targets[b][ambiguous] = ignore_index
+
+            # Optional: train a small amount of background.
+            #
+            # This is much safer than marking the whole outside region as bg.
+            # Background is sampled only outside annotated GT masks.
+            #
+            # Still not perfect for COCO, because outside annotated_union can
+            # contain unlabeled / non-COCO objects. Keep this weak.
+            if train_background:
+                fg_pixels = (owner_targets[b] >= 0) & (owner_targets[b] < num_queries)
+                num_fg = int(fg_pixels.sum().item())
+
+                if num_fg > 0:
+                    candidate_bg = ~annotated_union  # [H, W]
+                    candidate_bg = candidate_bg & (owner_targets[b] == ignore_index)
+
+                    bg_indices = torch.nonzero(candidate_bg.flatten(), as_tuple=False).squeeze(1)
+
+                    max_bg = int(num_fg * bg_sample_ratio)
+                    max_bg = min(max_bg, bg_indices.numel())
+
+                    if max_bg > 0:
+                        perm = torch.randperm(bg_indices.numel(), device=device)[:max_bg]
+                        sampled_bg = bg_indices[perm]
+
+                        flat_targets = owner_targets[b].flatten()
+                        flat_targets[sampled_bg] = bg_id
+                        owner_targets[b] = flat_targets.view(height, width)
 
         return owner_targets
 

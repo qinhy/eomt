@@ -282,8 +282,8 @@ def build_data_module(args: argparse.Namespace):
         # for overfiting
         # color_jitter_enabled=False,
         # scale_range=(1.0, 1.0),
-        # overfit_indices=[0, 1],
-        # overfit_repeat=2000,
+        overfit_indices=[0, 1],
+        overfit_repeat=200,
     )
 
 

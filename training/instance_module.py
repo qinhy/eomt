@@ -105,10 +105,10 @@ class MaskClassificationInstance(TrainModule):
         
         pred_without_background = self.network.predict(
                     mask_logits, class_logits, bbox_preds, owner_logits, img.shape[-2:],
-                    top_k=self.eval_top_k_instances, ignore_bg=True, score_threshold=None)
+                    top_k=self.eval_top_k_instances, score_threshold=None)
         pred_with_background = self.network.predict(
                     mask_logits, class_logits, bbox_preds, owner_logits, img.shape[-2:],
-                    top_k=self.eval_top_k_instances, ignore_bg=False, score_threshold=0.3)
+                    top_k=self.eval_top_k_instances, score_threshold=0.3)
 
         target_boxes = target.get("boxes")
         if target_boxes is None:
@@ -204,3 +204,15 @@ class MaskClassificationInstance(TrainModule):
 
     def on_validation_end(self):
         self._on_eval_end_instance("val")
+        
+    def _target_for_metrics(self, target: dict) -> dict:
+        if "boxes" in target:
+            target_boxes = target["boxes"].to(device=self.device)
+        else:
+            target_boxes = masks_to_boxes(target["masks"])
+        return {
+            "masks": target["masks"],
+            "labels": target["labels"],
+            "boxes": target_boxes,
+            "iscrowd": target["is_crowd"],
+        }
