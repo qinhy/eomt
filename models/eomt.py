@@ -170,8 +170,9 @@ class EoMT(nn.Module):
 
         D = self.encoder.embed_dim
         self.num_classes = num_classes
-        self.num_backbone_prefix_tokens = self.encoder.n_storage_tokens+1        
-        self.idx = self.Index(num_q+1,self.num_backbone_prefix_tokens)
+        self.num_backbone_prefix_tokens = self.encoder.n_storage_tokens+1
+        self.idx = self.Index(num_q,self.num_backbone_prefix_tokens)
+        self.q = nn.Embedding(num_q, D).to(dtype=dtype)
 
         self.fsrcnnx2 = None
         if fsrcnnx2:
@@ -183,22 +184,19 @@ class EoMT(nn.Module):
 
         self.register_buffer("attn_mask_probs", torch.ones(num_blocks).to(dtype=dtype))
 
-        self.q = nn.Embedding(num_q+1, D).to(dtype=dtype) # num_q + bg = num_q+1
 
         # class head 
         DD = num_classes + 1
         # mask head 
         DD += D
-        if self.owner_head_enabled:
-            DD += D
         if self.bbox_head_enabled:
         # bbox head 
             DD += 4
             self.bbox_res = masks_to_boxes_cxcywh
         self.output_head = nn.Sequential(
-            nn.Linear(D, int(DD*0.6)),  nn.GELU(),
-            nn.Linear(int(DD*0.6), int(DD*0.8)), nn.GELU(),
-            nn.Linear(int(DD*0.8), DD),
+            nn.Linear(D,       int(DD)), nn.GELU(),
+            nn.Linear(int(DD), int(DD)), nn.GELU(),
+            nn.Linear(int(DD), int(DD)),
         ).to(dtype=dtype)
 
         patch_size = self.encoder.patch_size
@@ -311,17 +309,16 @@ class EoMT(nn.Module):
         mask_logits = torch.einsum("bqd,bdhw->bqhw", query_mask_feats, patch_tokens_map_x2) # (B,Q,Hp*n,Wp*n)
 
         # new owner head: final non-overlap competition head
-        owner_queries_logits = None
+        owner_logits = None
         if self.owner_head_enabled:
-            owner_queries = output_logits[:, :, (cls_num + D) : (cls_num + D) + D]  # (B,Q,D)
-            owner_queries_logits = torch.einsum("bqd,bdhw->bqhw", owner_queries, patch_tokens_map_x2) # (B,Q,Hp*n,Wp*n)
-            
+            scores_logits = class_logits.max(dim=-1).values
+            owner_logits = scores_logits[:, :, None, None] * mask_logits # (B,Q,Hp*n,Wp*n)
+
         bbox_preds = None
         if self.bbox_head_enabled:
             bbox_preds = output_logits[:, :, -4 :].sigmoid() # normalized cxcywh in [0,1].
             bbox_preds = bbox_preds*(self.bbox_head_weight) + (1.0-self.bbox_head_weight)*self.bbox_res(mask_logits) # normalized cxcywh in [0,1]. # (B,Q,4)
-            bbox_preds = bbox_preds[:,:self.num_q,:]
-        return mask_logits[:,:self.num_q,:], class_logits[:,:self.num_q,:], bbox_preds, owner_queries_logits
+        return mask_logits[:,:self.num_q], class_logits[:,:self.num_q], bbox_preds[:,:self.num_q], owner_logits[:, :self.num_q]
 
     def forward_dinov3_phase1(self, x: torch.Tensor):
         backbone = self.encoder
@@ -370,12 +367,12 @@ class EoMT(nn.Module):
                     norm_x2 = backbone.norm(x2)
 
                 if self.training:
-                    mask_logits, class_logits, bbox_preds, owner_queries_logits = self._predict(
+                    mask_logits, class_logits, bbox_preds, owner_logits = self._predict(
                         query_tokens=norm_x[:,idx.query_start:idx.query_end],
                         patch_tokens_map=token2map(norm_x[:,idx.patch_start:],grid_size),
                         patch_tokens_map_x2=token2map(norm_x2[:,self.num_backbone_prefix_tokens:] if x2 is not None else None, grid_size_x2),
                     )
-                    res.append((mask_logits, class_logits, bbox_preds, owner_queries_logits))
+                    res.append((mask_logits, class_logits, bbox_preds, owner_logits))
 
                     attn_mask = self._attn_mask(N,mask_logits,
                                                 grid_size=grid_size,
@@ -397,12 +394,12 @@ class EoMT(nn.Module):
         if x2 is not None:
             norm_x2 = backbone.norm(x2)
 
-        mask_logits, class_logits, bbox_preds, owner_queries_logits = self._predict(
+        mask_logits, class_logits, bbox_preds, owner_logits = self._predict(
             query_tokens=norm_x[:,idx.query_start:idx.query_end],
             patch_tokens_map=token2map(norm_x[:,idx.patch_start:],grid_size),
             patch_tokens_map_x2=token2map(norm_x2[:,self.num_backbone_prefix_tokens:] if x2 is not None else None, grid_size_x2),
         )
-        res.append((mask_logits, class_logits, bbox_preds, owner_queries_logits))
+        res.append((mask_logits, class_logits, bbox_preds, owner_logits))
 
         mask_logits_per_layer = [m for m, _, _, _ in res]
         class_logits_per_layer = [c for _, c, _, _ in res]
@@ -480,12 +477,12 @@ class EoMT(nn.Module):
 
             if Q_box != Q or box_dim != 4:
                 raise ValueError(
-                    f"bbox_preds shape mismatch: got {bbox_preds.shape}, expected [B, Q, 4]"
+                    f"bbox_preds shape mismatch: got {bbox_preds.shape}, expected [{B}, {Q}, 4]"
                 )
 
-            if Q_p1 != Q + 1:
+            if Q_p1 != Q:
                 raise ValueError(
-                    f"owner_logits shape mismatch: got {owner_logits.shape}, expected [B, Q + 1, H, W]"
+                    f"owner_logits shape mismatch: got {owner_logits.shape}, expected [{B}, {Q}, {mask_h}, {mask_w}]"
                 )
 
             if (owner_h, owner_w) != (mask_h, mask_w):
@@ -538,7 +535,7 @@ class EoMT(nn.Module):
             mask_logits = mask_logits[0]        # [Q, Hm, Wm]
             class_logits = class_logits[0]      # [Q, C + 1]
             bbox_preds = bbox_preds[0]          # [Q, 4]
-            owner_logits = owner_logits[0]      # [Q + 1, Hm, Wm]
+            owner_logits = owner_logits[0]      # [Q, Hm, Wm]
 
             # ------------------------------------------------------------
             # Class scores.

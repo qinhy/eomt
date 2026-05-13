@@ -281,6 +281,12 @@ class Transforms(nn.Module):
         scale_x = self.img_size[1] / src_w
         scale_y = self.img_size[0] / src_h
 
+        target["img2"] = T.functional.resize(
+            img,
+            size=(self.img_size[0]*2, self.img_size[1]*2),
+            interpolation=InterpolationMode.BILINEAR,
+            antialias=True,
+        )
         img = T.functional.resize(
             img,
             size=self.img_size,

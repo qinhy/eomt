@@ -199,13 +199,13 @@ class TrainModule(nn.Module):
         }
 
     def forward(self, imgs, imgs2=None):
-        assert imgs.dtype == torch.uint8, "input image should be raw uint8 images"
+        def uint8tofloat(img):
+            if img is None:return None
+            assert img.dtype == torch.uint8, "input image should be raw uint8 images"
+            return img / 255.0
 
-        x = imgs / 255.0
-        x2 = None
-        if imgs2 is not None:
-            assert imgs2.dtype == torch.uint8, "input image should be raw uint8 images"
-            x2 = imgs2 / 255.0
+        x = uint8tofloat(imgs)
+        x2 = uint8tofloat(imgs2)
 
         if x2 is None:
             return self.network.forward(x)
@@ -213,7 +213,11 @@ class TrainModule(nn.Module):
 
     def training_step(self, batch, batch_idx):
         imgs, targets = batch
-        mask_logits_per_block, class_logits_per_block, bbox_preds_per_block, owner_logits_per_layer = self(imgs)
+        if "imgs2" in targets[0]:
+            imgs2 = torch.cat([target["imgs2"] for target in targets], dim=0)
+        else:
+            imgs2 = None
+        mask_logits_per_block, class_logits_per_block, bbox_preds_per_block, owner_logits_per_layer = self(imgs,imgs2)
 
         losses_all_blocks = {}
         for i, (mask_logits, class_logits, bbox_preds, owner_logits) in enumerate(
